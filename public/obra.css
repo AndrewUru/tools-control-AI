@@ -182,7 +182,7 @@ label { color: var(--text-2); font-weight: 600; }
 .quick { grid-template-columns: 1fr auto auto auto; margin: 18px 0 0; gap: 8px; }
 .quick .primary:disabled { background: var(--surface-3); border-color: var(--surface-3); color: var(--muted); box-shadow: none; }
 .quick .primary:disabled .i { color: var(--muted); }
-.quick > .more { width: 48px; padding: 0; justify-content: center; }
+.quick > button.more { width: 48px; padding: 0; justify-content: center; }
 .quick > .more .i { width: 22px; height: 22px; }
 .hero .banner { margin-top: 16px; }
 .sheet-actions { margin-bottom: 4px; }
@@ -301,7 +301,7 @@ dialog.sheet.scan-sheet { background: #0d0e10; color: #fff; }
   .stat .ico { width: 32px; height: 32px; }
   .stat .n { font-size: 1.35rem; }
   .quick > :not(.primary) { width: 60px; }
-  .quick > .more { width: 44px; }
+  .quick > button.more { width: 44px; }
   .quick { gap: 6px; }
   .login { padding-left: 16px; padding-right: 16px; }
 }

@@ -29,6 +29,10 @@ Incluye búsqueda, filtros, fichas, altas y edición, ubicaciones, personas, mov
 
 Verificación QR: lectura de los cinco tamaños a 300 ppp, dimensiones y paginación PDF, selección y copias, lectura de un vídeo simulado, permiso denegado y liberación de cámara al cerrar. Falta la prueba física de cámara e impresora en el móvil.
 
+## Dar de baja una herramienta (versión 1.6)
+
+En la ficha, pulsa **⋯ → Dar de baja**, elige el motivo y la fecha y confirma. La herramienta pasa a **Retirada**: sale del inventario activo, no se puede asignar y se cancelan sus mantenimientos programados. El motivo, la fecha y quién la dio de baja quedan en sus observaciones. El historial se conserva y **⋯ → Reactivar herramienta** la devuelve al inventario.
+
 ## Volver a generar el APK
 
 Verificación realizada: compilación del APK, firma APK v2, instalación en emulador y pruebas de API/SQLite en Node (login, validaciones, herramientas, movimientos, incidencias, mantenimiento y persistencia). La prueba completa de interfaz y persistencia dentro de Android no pudo completarse: el emulador Android 37 sufrió bloqueos de System UI y tiempos de espera. Antes de la presentación, abre el APK en tu móvil y recorre el guion anterior en modo avión.
