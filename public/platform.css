@@ -1,0 +1,40 @@
+/* Safe areas in Safari / installed iOS web apps, including landscape. */
+@media screen {
+  .appbar {
+    min-height: calc(64px + env(safe-area-inset-top));
+    padding-left: max(15px, env(safe-area-inset-left));
+    padding-right: max(20px, env(safe-area-inset-right));
+  }
+  .main {
+    padding-left: max(20px, env(safe-area-inset-left));
+    padding-right: max(20px, env(safe-area-inset-right));
+  }
+  .search-head { top: calc(64px + env(safe-area-inset-top)); }
+  .tabbar {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+    flex-shrink: 0;
+  }
+  .drawer { padding-left: max(10px, env(safe-area-inset-left)); padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+  dialog.sheet {
+    max-width: min(560px, 100%);
+    padding-left: max(18px, env(safe-area-inset-left));
+    padding-right: max(18px, env(safe-area-inset-right));
+  }
+  /* iOS does not zoom the viewport when focusing a 16px input. */
+  input, select, textarea { font-size: 16px; }
+  [hidden] { display: none !important; }
+}
+@media screen and (min-width: 900px) {
+  :root { --app-w: 1120px; }
+  .main { padding: 24px 32px 40px; }
+  .appbar { padding-left: 32px; padding-right: 32px; }
+  .search-head { margin-left: -32px; margin-right: -32px; padding-left: 32px; padding-right: 32px; }
+  #resultados > .stack { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .login { max-width: 560px; margin: auto; }
+  body.sin-sesion .app-shell { max-width: 560px; }
+  .tabbar { justify-content: center; }
+  .tabbar > a, .tabbar > button { max-width: 180px; }
+  .label-settings { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .label-settings > h3, .label-settings > details, .label-settings > p { grid-column: 1 / -1; }
+}

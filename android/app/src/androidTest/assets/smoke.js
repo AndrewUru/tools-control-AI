@@ -1,0 +1,24 @@
+(async () => {
+  const assert = (condition, message) => { if (!condition) throw new Error(message); };
+  const bad = await fetch('/api/login', { method: 'POST', body: JSON.stringify({email: 'laura.gomez@reformas-ejemplo.es', password: 'wrong'}) });
+  assert(bad.status === 401, 'Incorrect password accepted');
+  const session = await api('POST', '/api/login', { email: 'laura.gomez@reformas-ejemplo.es', password: 'demo' });
+  SES.guardar(session.token, session.usuario);
+  assert((await GET('/api/dashboard')).indicadores.total >= 20, 'Demo data missing');
+  const h = await api('POST', '/api/herramientas', { codigo: 'MVP-SMOKE-' + Date.now(), nombre: 'Prueba persistencia MVP', categoria: 'Otros', estado: 'Disponible', ubicacion_actual_id: 1, responsable_actual_id: 2 });
+  await api('POST', '/api/movimientos', { herramienta_id: h.id, destino_id: 2, receptor_id: 1, tipo: 'Entrega' });
+  let moved = await GET('/api/herramientas/' + h.id);
+  assert(moved.ubicacion_actual_id === 2 && moved.estado === 'En uso', 'Movement trigger failed');
+  const incident = await api('POST', '/api/incidencias', { herramienta_id: h.id, tipo: 'Avería', descripcion: 'Prueba MVP', prioridad: 'Media', estado: 'Abierta', marcar_averiada: true });
+  assert((await GET('/api/herramientas/' + h.id)).estado === 'Averiada', 'Incident state failed');
+  await api('PUT', '/api/incidencias/' + incident.id, { estado: 'Resuelta' });
+  assert((await GET('/api/herramientas/' + h.id)).estado === 'En uso', 'Incident resolution failed');
+  const maintenance = await api('POST', '/api/mantenimientos', { herramienta_id: h.id, tipo: 'Revisión', fecha_prevista: '2026-10-21', estado: 'Programado' });
+  await api('PUT', '/api/mantenimientos/' + maintenance.id, { estado: 'Realizado' });
+  assert((await GET('/api/mantenimientos')).some(m => m.id === maintenance.id && m.estado === 'Realizado'), 'Maintenance failed');
+  const invalid = await fetch('/api/movimientos', { method: 'POST', headers: {Authorization: 'Bearer ' + session.token}, body: JSON.stringify({ herramienta_id: h.id, destino_id: 999999, tipo: 'Entrega' }) });
+  assert(!invalid.ok, 'Invalid movement accepted');
+  await router();
+  assert(document.querySelector('#app').innerText.includes('herramienta'), 'Inventory UI missing');
+  window.SMOKE_RESULT = 'PASS';
+})().catch(error => window.SMOKE_RESULT = 'FAIL: ' + error.message);

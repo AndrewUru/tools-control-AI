@@ -1,0 +1,13 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'es.herramientas.inventario'
+    compileSdk 36
+    defaultConfig {
+        applicationId 'es.herramientas.inventario'
+        minSdk 26
+        targetSdk 36
+        versionCode 6
+        versionName '1.5-solo-qr'
+        testInstrumentationRunner 'es.herramientas.inventario.OfflineSmokeTest'
+    }
+}
