@@ -1,0 +1,8 @@
+# Sustituye el dominio. Caddy obtiene y renueva el certificado HTTPS automáticamente.
+inventario.tudominio.es {
+	encode gzip
+	request_body {
+		max_size 40MB
+	}
+	reverse_proxy 127.0.0.1:3000
+}

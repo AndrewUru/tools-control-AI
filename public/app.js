@@ -165,6 +165,7 @@ function leerImagen(file, max = 1280) {
 
 // QR ------------------------------------------------------------------------------
 function baseQR() {
+  if (window.SERVIDOR) return window.SERVIDOR;   // APK conectada: el QR abre también la web del servidor
   const local = ['localhost', '127.0.0.1', '::1'].includes(location.hostname);
   return local ? CONFIG.publicUrl : location.origin;
 }
@@ -968,7 +969,7 @@ VISTAS.movimiento = async ([ref], q = {}) => {
     const btn = $('.sticky-cta .btn', f); btn.disabled = true;
     try {
       const m = await api('POST', '/api/movimientos', d);
-      toast(`${m.tipo} registrada · ${m.destino_nombre}`);
+      toast(m.pendiente ? 'Sin conexión: se enviará al recuperar la cobertura' : `${m.tipo} registrada · ${m.destino_nombre}`);
       location.hash = '#/herramienta/' + enc(m.codigo);
     } catch (err) { toast(err.message, true); btn.disabled = false; }
   });
@@ -1019,7 +1020,7 @@ VISTAS.incidencia = async ([ref]) => {
     const btn = $('.sticky-cta .btn', f); btn.disabled = true;
     try {
       const i = await api('POST', '/api/incidencias', { ...datosForm(f), fotos });
-      toast('Incidencia enviada. ¡Gracias!');
+      toast(i.pendiente ? 'Sin conexión: se enviará al recuperar la cobertura' : 'Incidencia enviada. ¡Gracias!');
       location.hash = '#/herramienta/' + enc(i.codigo);
     } catch (err) { toast(err.message, true); btn.disabled = false; }
   });

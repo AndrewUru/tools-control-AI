@@ -131,5 +131,15 @@ const servidores = [arrancar(3103), arrancar(3104, { NO_SEED: '1', DEMO: '0', CL
   const d1 = (await nueva('GET', '/api/dashboard', t1)).data.indicadores;
   assert.equal(d1.total, 1);
   assert.equal((await nueva('GET', '/api/herramientas/' + h1.id, t1)).data.nombre, 'Taladro A');
-  console.log('PASS: permisos por rol, contraseña propia, eliminación de usuarios, último admin, primer arranque y aislamiento entre empresas.');
+  // Alta con el script del propietario
+  const { execFileSync } = require('node:child_process');
+  const salida = execFileSync(process.execPath, ['scripts/nueva-empresa.js', 'http://localhost:3104', 'Reformas Gamma', 'Gema Ruiz Sanz', 'gema@gamma.es'],
+    { env: { ...process.env, CLAVE_ALTA: 'clave-de-alta-de-prueba-123' } }).toString();
+  const pass = /Contraseña inicial: (\S+)/.exec(salida)[1];
+  assert.equal((await nueva('POST', '/api/login', null, { email: 'gema@gamma.es', password: pass })).data.usuario.empresa_nombre, 'Reformas Gamma');
+
+  // Límite de intentos: tras 10 fallos, la IP queda bloqueada un rato
+  for (let i = 0; i < 10; i++) await nueva('POST', '/api/login', null, { email: 'gema@gamma.es', password: 'mal' });
+  assert.equal((await nueva('POST', '/api/login', null, { email: 'gema@gamma.es', password: pass })).status, 429);
+  console.log('PASS: límite de intentos, alta por script, permisos por rol, contraseña propia, eliminación de usuarios, último admin, primer arranque y aislamiento entre empresas.');
 })().catch(e => { console.error(e); process.exitCode = 1; }).finally(() => servidores.forEach(s => s.kill()));

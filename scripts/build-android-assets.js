@@ -5,7 +5,11 @@ const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const root = path.resolve(__dirname, '..');
 // EDICION=cliente: base de datos vacía, sin accesos de demostración; el primer arranque crea el administrador
-const cliente = process.env.EDICION === 'cliente';
+// EDICION=nube: la app usa el servidor común (SERVIDOR=https://...) y guarda en cola lo registrado sin conexión
+const nube = process.env.EDICION === 'nube';
+const cliente = process.env.EDICION === 'cliente' || nube;
+const SERVIDOR = String(process.env.SERVIDOR || '').replace(/\/$/, '');
+if (nube && !/^https:\/\/[^/]+$/.test(SERVIDOR)) throw new Error('EDICION=nube necesita SERVIDOR=https://dominio');
 const out = path.join(root, 'android/app/src/main/assets');
 fs.mkdirSync(out, { recursive: true });
 fs.cpSync(path.join(root, 'public'), path.join(out, 'web'), { recursive: true });
@@ -53,5 +57,10 @@ window.fetch = async (input, options = {}) => {
 window.print = () => Android.print(document.querySelector('#label-format')?.value || 'a4-mediana');
 })();\n`);
 const htmlPath = path.join(out, 'web/index.html');
-fs.writeFileSync(htmlPath, fs.readFileSync(htmlPath, 'utf8').replace('<script src="app.js">', '<script src="offline.js"></script>\n  <script src="app.js">'));
+if (nube) {
+  fs.rmSync(path.join(out, 'web/offline.js'));
+  fs.writeFileSync(path.join(out, 'web/nube.js'),
+    fs.readFileSync(path.join(__dirname, 'nube-cliente.js'), 'utf8').replace("'__SERVIDOR__'", JSON.stringify(SERVIDOR)));
+} else fs.rmSync(path.join(out, 'web/nube.js'), { force: true });
+fs.writeFileSync(htmlPath, fs.readFileSync(htmlPath, 'utf8').replace('<script src="app.js">', `<script src="${nube ? 'nube' : 'offline'}.js"></script>\n  <script src="app.js">`));
 console.log(`Android assets ready: offline UI, API and fresh ${cliente ? 'empty' : 'demo'} database.`);

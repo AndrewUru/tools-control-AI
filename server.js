@@ -49,6 +49,11 @@ function migrar() {
     if (!cols(t).includes('empresa_id')) db.exec(`ALTER TABLE ${t} ADD COLUMN empresa_id INTEGER NOT NULL DEFAULT 1`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_${t}_empresa ON ${t}(empresa_id)`);
   }
+  // uuid: identificador que pone el móvil a lo registrado sin conexión, para no duplicarlo al reenviar
+  for (const t of ['movimientos', 'incidencias']) {
+    if (!cols(t).includes('uuid')) db.exec(`ALTER TABLE ${t} ADD COLUMN uuid TEXT`);
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_${t}_uuid ON ${t}(uuid)`);
+  }
   const conAcceso = `empresa_id = ? AND estado = 'Activo' AND password_hash IS NOT NULL AND eliminado_en IS NULL`;
   for (const { id: e } of all(`SELECT id FROM empresas`)) {
     if (get(`SELECT id FROM personas WHERE rol = 'admin' AND ${conAcceso}`, e)) continue;
@@ -76,6 +81,17 @@ function ahora() {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 const hoy = () => ahora().slice(0, 10);
+
+// Lo registrado sin conexión conserva su hora real si es de los últimos 7 días (y no del futuro)
+const UUID = /^[a-zA-Z0-9-]{8,64}$/;
+function fechaSinConexion(body) {
+  if (!UUID.test(String(body.uuid || '')) || !body.fecha_hora) return null;
+  const f = String(body.fecha_hora).replace('T', ' ').slice(0, 16);
+  const d = new Date(); d.setDate(d.getDate() - 7);
+  const p = n => String(n).padStart(2, '0');
+  const limite = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(f) && f >= limite && f <= ahora() ? f : null;
+}
 
 // Normaliza un valor de formulario para SQLite
 function val(v) {
@@ -542,7 +558,12 @@ ruta('GET', '/api/movimientos', (q, _, b, usuario) => {
 
 ruta('POST', '/api/movimientos', (q, p, body, usuario) => tx(() => {
   // Un empleado solo registra a su nombre y con la hora real; el admin puede corregir ambos datos
-  if (!esAdmin(usuario)) { body.realizado_por_id = usuario.id; body.fecha_hora = null; }
+  const uuid = UUID.test(String(body.uuid || '')) ? String(body.uuid) : null;
+  if (uuid) {   // reenvío de algo ya registrado: se devuelve lo que ya existe
+    const ya = get(`${SQL_MOV} WHERE m.uuid = ? AND h.empresa_id = ?`, uuid, usuario.empresa_id);
+    if (ya) return ya;
+  }
+  if (!esAdmin(usuario)) { body.realizado_por_id = usuario.id; body.fecha_hora = fechaSinConexion(body); }
   if (!val(body.realizado_por_id)) body.realizado_por_id = usuario.id;   // por defecto, quien ha iniciado sesión
   const h = get(`SELECT * FROM herramientas WHERE id = ? AND empresa_id = ?`, Number(body.herramienta_id), usuario.empresa_id);
   if (!h) throw new HttpError(400, 'Herramienta no válida');
@@ -562,6 +583,7 @@ ruta('POST', '/api/movimientos', (q, p, body, usuario) => tx(() => {
     receptor_id: val(body.receptor_id),
     tipo: body.tipo,
     observaciones: val(body.observaciones),
+    uuid,
   });
   return get(`${SQL_MOV} WHERE m.id = ?`, id);
 }));
@@ -581,6 +603,12 @@ ruta('GET', '/api/incidencias', (q, _, b, usuario) => {
 
 ruta('POST', '/api/incidencias', (q, p, body, usuario) => tx(() => {
   const d = pick(body, CAMPOS.incidencias);
+  const uuid = UUID.test(String(body.uuid || '')) ? String(body.uuid) : null;
+  if (uuid) {
+    const ya = get(`${SQL_INC} WHERE i.uuid = ? AND h.empresa_id = ?`, uuid, usuario.empresa_id);
+    if (ya) return parseFotos(ya);
+    d.uuid = uuid;
+  }
   if (!esAdmin(usuario)) { d.comunicada_por_id = usuario.id; delete d.estado; delete d.fecha_resolucion; }
   if (!d.comunicada_por_id) d.comunicada_por_id = usuario.id;
   if (!d.herramienta_id) throw new HttpError(400, 'Indica la herramienta');
@@ -672,7 +700,36 @@ function leerCuerpo(req) {
   });
 }
 
+// Límite de intentos fallidos de login y de alta de empresas: 10 por IP cada 15 minutos.
+// TRUST_PROXY=1 cuando el servidor va detrás de Caddy/nginx, para tomar la IP real de X-Forwarded-For.
+const TRUST_PROXY = process.env.TRUST_PROXY === '1';
+const RUTAS_LIMITADAS = new Set(['/api/login', '/api/empresas', '/api/yo/password']);
+const intentos = new Map();
+const VENTANA = 15 * 60 * 1000, MAX_FALLOS = 10;
+function bloqueada(ip) {
+  const i = intentos.get(ip);
+  if (i && Date.now() - i.desde > VENTANA) { intentos.delete(ip); return false; }
+  return !!i && i.n >= MAX_FALLOS;
+}
+function fallo(ip) {
+  const i = intentos.get(ip);
+  if (!i || Date.now() - i.desde > VENTANA) intentos.set(ip, { n: 1, desde: Date.now() }); else i.n++;
+  if (intentos.size > 10000) intentos.clear();   // tope de memoria
+}
+
+// CORS: la APK conectada carga la interfaz desde sus recursos y llama a esta API
+const ORIGENES = (process.env.CORS_ORIGENES || 'https://appassets.androidplatform.net').split(',').map(s => s.trim()).filter(Boolean);
+
 const servidor = http.createServer(async (req, res) => {
+  const origen = req.headers.origin;
+  if (origen && ORIGENES.includes(origen)) {
+    res.setHeader('Access-Control-Allow-Origin', origen);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Max-Age', '86400');
+  }
+  if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
   const url = new URL(req.url, 'http://localhost');
   const ruta_ = decodeURIComponent(url.pathname);
 
@@ -690,7 +747,10 @@ const servidor = http.createServer(async (req, res) => {
   if (ruta_.startsWith('/api/')) {
     const r = rutas.find(r => r.metodo === req.method && r.re.test(url.pathname));
     if (!r) return enviarJSON(res, 404, { error: 'Ruta no encontrada' });
+    const ip = TRUST_PROXY ? String(req.headers['x-forwarded-for'] || '').split(',').pop().trim() || req.socket.remoteAddress : req.socket.remoteAddress;
+    const vigilada = RUTAS_LIMITADAS.has(url.pathname);
     try {
+      if (vigilada && bloqueada(ip)) throw new HttpError(429, 'Demasiados intentos. Espera unos minutos y vuelve a probar.');
       const usuario = usuarioDeSesion(req);
       if (!usuario && !RUTAS_PUBLICAS.has(url.pathname)) throw new HttpError(401, 'Inicia sesión para continuar');
       const m = r.re.exec(url.pathname);
@@ -703,6 +763,7 @@ const servidor = http.createServer(async (req, res) => {
       else if (/UNIQUE constraint failed: ubicaciones.nombre/.test(msg)) { status = 409; msg = 'Ya existe una ubicación con ese nombre'; }
       else if (/CHECK constraint failed|FOREIGN KEY constraint failed|no se puede/.test(msg)) status = 400;
       if (status === 500) console.error(e);
+      if (vigilada && (status === 401 || status === 403)) fallo(ip);
       enviarJSON(res, status, { error: msg });
     }
     return;
