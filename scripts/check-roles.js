@@ -21,7 +21,7 @@ const listo = async port => {
   }
   throw new Error('El servidor no arranca');
 };
-const servidores = [arrancar(3103), arrancar(3104, { NO_SEED: '1', DEMO: '0' })];
+const servidores = [arrancar(3103), arrancar(3104, { NO_SEED: '1', DEMO: '0', CLAVE_ALTA: 'clave-de-alta-de-prueba-123' })];
 (async () => {
   await Promise.all([listo(3103), listo(3104)]);
   const api = cliente(3103);
@@ -103,5 +103,33 @@ const servidores = [arrancar(3103), arrancar(3104, { NO_SEED: '1', DEMO: '0' })]
   assert.equal((await nueva('POST', '/api/primer-admin', null, { nombre: 'B', email: 'c@d.es', password: 'secreto1' })).status, 409);
   assert.equal((await nueva('GET', '/api/ubicaciones', primero.data.token)).data.length, 1);
   assert.equal((await nueva('GET', '/api/config')).data.primerUso, false);
-  console.log('PASS: permisos por rol, contraseña propia, eliminación de usuarios, último admin y primer arranque.');
+
+  // Servidor común: una segunda empresa no ve ni toca nada de la primera
+  const t1 = primero.data.token;
+  const h1 = (await nueva('POST', '/api/herramientas', t1, { nombre: 'Taladro A', categoria: 'Taladros', ubicacion_actual_id: 1 })).data;
+  assert.equal(h1.codigo, 'TAL-001');
+  assert.equal((await nueva('POST', '/api/empresas', null, { clave: 'mala', empresa: 'X', nombre: 'X', email: 'x@x.es', password: 'secreto1' })).status, 403);
+  const alta = await nueva('POST', '/api/empresas', null, { clave: 'clave-de-alta-de-prueba-123', empresa: 'Reformas Beta', nombre: 'Bea', email: 'bea@beta.es', password: 'secreto1' });
+  assert.equal(alta.status, 200, JSON.stringify(alta.data));
+  const t2 = (await nueva('POST', '/api/login', null, { email: 'bea@beta.es', password: 'secreto1' })).data.token;
+  assert.equal((await nueva('GET', '/api/yo', t2)).data.empresa_nombre, 'Reformas Beta');
+  assert.equal((await nueva('GET', '/api/herramientas', t2)).data.length, 0);
+  assert.equal((await nueva('GET', '/api/personas', t2)).data.length, 1);
+  const ubi2 = (await nueva('GET', '/api/ubicaciones', t2)).data;
+  assert.equal(ubi2.length, 1);
+  for (const [m, url, body] of [
+    ['GET', '/api/herramientas/' + h1.id], ['GET', '/api/herramientas/' + h1.qr_token], ['GET', '/api/herramientas/TAL-001'],
+    ['PUT', '/api/herramientas/' + h1.id, { nombre: 'hack' }], ['POST', `/api/herramientas/${h1.id}/baja`, { motivo: 'Otro' }],
+    ['PUT', '/api/ubicaciones/1', { nombre: 'hack' }], ['PUT', '/api/personas/1', { nombre: 'hack' }], ['DELETE', '/api/personas/1'],
+    ['POST', '/api/movimientos', { herramienta_id: h1.id, destino_id: ubi2[0].id, tipo: 'Traslado' }],
+    ['POST', '/api/incidencias', { herramienta_id: h1.id, descripcion: 'x' }],
+    ['POST', '/api/mantenimientos', { herramienta_id: h1.id, fecha_prevista: '2030-01-01' }],
+    ['POST', '/api/herramientas', { nombre: 'x', ubicacion_actual_id: 1 }],
+  ]) assert((await nueva(m, url, t2, body)).status >= 400, `fuga entre empresas: ${m} ${url}`);
+  const h2 = (await nueva('POST', '/api/herramientas', t2, { nombre: 'Taladro B', categoria: 'Taladros' })).data;
+  assert.equal(h2.codigo, 'TAL-001', 'los códigos se numeran por empresa');
+  const d1 = (await nueva('GET', '/api/dashboard', t1)).data.indicadores;
+  assert.equal(d1.total, 1);
+  assert.equal((await nueva('GET', '/api/herramientas/' + h1.id, t1)).data.nombre, 'Taladro A');
+  console.log('PASS: permisos por rol, contraseña propia, eliminación de usuarios, último admin, primer arranque y aislamiento entre empresas.');
 })().catch(e => { console.error(e); process.exitCode = 1; }).finally(() => servidores.forEach(s => s.kill()));

@@ -386,6 +386,7 @@ function vistaPrimerUso() {
         <p>Crea el usuario administrador de tu empresa</p>
       </div>
       <form class="login-form" id="f-primer">
+        <label class="field-ic"><span class="sr-only">Empresa</span>${I('building-2')}<input name="empresa" required autocomplete="organization" placeholder="Nombre de la empresa"></label>
         <label class="field-ic"><span class="sr-only">Nombre</span>${I('user')}<input name="nombre" required autocomplete="given-name" placeholder="Nombre"></label>
         <label class="field-ic"><span class="sr-only">Apellidos</span>${I('user')}<input name="apellidos" autocomplete="family-name" placeholder="Apellidos"></label>
         <label class="field-ic"><span class="sr-only">Email</span>${I('user')}<input type="email" name="email" required autocomplete="username" inputmode="email" placeholder="Email (será tu usuario)"></label>

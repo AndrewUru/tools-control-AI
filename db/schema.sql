@@ -3,9 +3,19 @@
 -- =====================================================================
 PRAGMA foreign_keys = ON;
 
+-- 0. EMPRESAS (cada cliente ve solo sus datos) ----------------------------
+CREATE TABLE IF NOT EXISTS empresas (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  nombre    TEXT NOT NULL,
+  creada_en TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+-- La empresa 1 existe siempre: es la de una instalación individual o la de demostración
+INSERT OR IGNORE INTO empresas (id, nombre) VALUES (1, 'Mi empresa');
+
 -- 3. PERSONAS ----------------------------------------------------------
 CREATE TABLE IF NOT EXISTS personas (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  empresa_id INTEGER NOT NULL DEFAULT 1 REFERENCES empresas(id),
   nombre     TEXT NOT NULL,
   apellidos  TEXT,
   telefono   TEXT,
@@ -28,13 +38,15 @@ CREATE TABLE IF NOT EXISTS sesiones (
 -- 2. UBICACIONES -------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ubicaciones (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
-  nombre         TEXT NOT NULL UNIQUE,
+  empresa_id     INTEGER NOT NULL DEFAULT 1 REFERENCES empresas(id),
+  nombre         TEXT NOT NULL,
   tipo           TEXT NOT NULL DEFAULT 'Almacén'
                  CHECK (tipo IN ('Almacén','Obra','Vehículo','Oficina','Otra')),
   direccion      TEXT,
   responsable_id INTEGER REFERENCES personas(id) ON DELETE SET NULL,
   estado         TEXT NOT NULL DEFAULT 'Activa' CHECK (estado IN ('Activa','Cerrada')),
-  observaciones  TEXT
+  observaciones  TEXT,
+  UNIQUE (empresa_id, nombre)
 );
 
 -- 1. HERRAMIENTAS ------------------------------------------------------
@@ -43,7 +55,8 @@ CREATE TABLE IF NOT EXISTS ubicaciones (
 -- proximo_mantenimiento se calcula solo a partir de MANTENIMIENTOS.
 CREATE TABLE IF NOT EXISTS herramientas (
   id                    INTEGER PRIMARY KEY AUTOINCREMENT,
-  codigo                TEXT NOT NULL UNIQUE,          -- p.ej. TAL-001
+  empresa_id            INTEGER NOT NULL DEFAULT 1 REFERENCES empresas(id),
+  codigo                TEXT NOT NULL,                 -- p.ej. TAL-001, único dentro de cada empresa
   nombre                TEXT NOT NULL,
   categoria             TEXT,
   marca                 TEXT,
@@ -59,7 +72,8 @@ CREATE TABLE IF NOT EXISTS herramientas (
   proximo_mantenimiento TEXT,
   observaciones         TEXT,
   qr_token              TEXT NOT NULL UNIQUE,          -- identificador fijo de la etiqueta QR
-  creado_en             TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+  creado_en             TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  UNIQUE (empresa_id, codigo)
 );
 
 -- 4. MOVIMIENTOS (historial inmutable) ----------------------------------

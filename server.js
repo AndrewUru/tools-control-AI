@@ -38,20 +38,27 @@ const all = (sql, ...p) => db.prepare(sql).all(...p);
 const get = (sql, ...p) => db.prepare(sql).get(...p);
 const run = (sql, ...p) => db.prepare(sql).run(...p);
 
-// Bases de datos anteriores a los roles (también las ya instaladas en Android).
-// Garantiza además que siempre haya un administrador con acceso.
-function asegurarRoles() {
-  const cols = all(`PRAGMA table_info(personas)`).map(c => c.name);
-  if (!cols.includes('rol')) db.exec(`ALTER TABLE personas ADD COLUMN rol TEXT NOT NULL DEFAULT 'empleado' CHECK (rol IN ('admin','empleado'))`);
-  if (!cols.includes('eliminado_en')) db.exec(`ALTER TABLE personas ADD COLUMN eliminado_en TEXT`);
-  const conAcceso = `estado = 'Activo' AND password_hash IS NOT NULL AND eliminado_en IS NULL`;
-  if (get(`SELECT id FROM personas WHERE rol = 'admin' AND ${conAcceso}`)) return;
-  run(`UPDATE personas SET rol = 'admin' WHERE ${conAcceso} AND (lower(cargo) LIKE '%jefe%'
-    OR lower(cargo) LIKE '%encargad%' OR lower(cargo) LIKE '%administra%' OR lower(cargo) LIKE '%gerente%')`);
-  if (get(`SELECT id FROM personas WHERE rol = 'admin' AND ${conAcceso}`)) return;
-  run(`UPDATE personas SET rol = 'admin' WHERE id = (SELECT MIN(id) FROM personas WHERE ${conAcceso})`);
+// Bases de datos anteriores a los roles y a las empresas (también las ya instaladas en Android).
+// En ellas todo pasa a la empresa 1. Garantiza además que cada empresa tenga un administrador con acceso.
+function migrar() {
+  const cols = t => all(`PRAGMA table_info(${t})`).map(c => c.name);
+  const p = cols('personas');
+  if (!p.includes('rol')) db.exec(`ALTER TABLE personas ADD COLUMN rol TEXT NOT NULL DEFAULT 'empleado' CHECK (rol IN ('admin','empleado'))`);
+  if (!p.includes('eliminado_en')) db.exec(`ALTER TABLE personas ADD COLUMN eliminado_en TEXT`);
+  for (const t of ['personas', 'ubicaciones', 'herramientas']) {
+    if (!cols(t).includes('empresa_id')) db.exec(`ALTER TABLE ${t} ADD COLUMN empresa_id INTEGER NOT NULL DEFAULT 1`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_${t}_empresa ON ${t}(empresa_id)`);
+  }
+  const conAcceso = `empresa_id = ? AND estado = 'Activo' AND password_hash IS NOT NULL AND eliminado_en IS NULL`;
+  for (const { id: e } of all(`SELECT id FROM empresas`)) {
+    if (get(`SELECT id FROM personas WHERE rol = 'admin' AND ${conAcceso}`, e)) continue;
+    run(`UPDATE personas SET rol = 'admin' WHERE ${conAcceso} AND (lower(cargo) LIKE '%jefe%'
+      OR lower(cargo) LIKE '%encargad%' OR lower(cargo) LIKE '%administra%' OR lower(cargo) LIKE '%gerente%')`, e);
+    if (get(`SELECT id FROM personas WHERE rol = 'admin' AND ${conAcceso}`, e)) continue;
+    run(`UPDATE personas SET rol = 'admin' WHERE id = (SELECT MIN(id) FROM personas WHERE ${conAcceso})`, e);
+  }
 }
-asegurarRoles();
+migrar();
 
 function tx(fn) {
   db.exec('BEGIN');
@@ -114,9 +121,9 @@ function guardarImagen(dataUrl) {
 }
 
 // Busca una herramienta por id, código interno o token QR
-function buscarHerramienta(ref) {
-  const h = get(`SELECT * FROM v_herramientas WHERE codigo = ? COLLATE NOCASE OR qr_token = ? OR id = ?`,
-    ref, ref, /^\d+$/.test(ref) ? Number(ref) : -1);
+function buscarHerramienta(ref, empresa) {
+  const h = get(`SELECT * FROM v_herramientas WHERE empresa_id = ? AND (codigo = ? COLLATE NOCASE OR qr_token = ? OR id = ?)`,
+    empresa, ref, ref, /^\d+$/.test(ref) ? Number(ref) : -1);
   if (!h) throw new HttpError(404, `Herramienta "${ref}" no encontrada`);
   return h;
 }
@@ -146,9 +153,9 @@ const PREFIJOS = {
   Maquinaria: 'MAQ', 'Medición': 'MED', Andamios: 'AND', Otros: 'OTR',
 };
 
-function siguienteCodigo(prefijo) {
+function siguienteCodigo(prefijo, empresa) {
   prefijo = String(prefijo || 'OTR').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 4) || 'OTR';
-  const filas = all(`SELECT codigo FROM herramientas WHERE codigo LIKE ?`, `${prefijo}-%`);
+  const filas = all(`SELECT codigo FROM herramientas WHERE empresa_id = ? AND codigo LIKE ?`, empresa, `${prefijo}-%`);
   const max = filas.reduce((m, r) => Math.max(m, parseInt(r.codigo.split('-')[1], 10) || 0), 0);
   return `${prefijo}-${String(max + 1).padStart(3, '0')}`;
 }
@@ -215,10 +222,26 @@ const soloAdmin = fn => (q, p, b, usuario, req) => {
   return fn(q, p, b, usuario, req);
 };
 
+// Aislamiento entre empresas: todo id que llega del cliente se comprueba contra la empresa del usuario.
+// Movimientos, incidencias y mantenimientos pertenecen a la empresa de su herramienta.
+const DE_EMPRESA = {
+  personas: `SELECT id FROM personas WHERE id = ? AND empresa_id = ?`,
+  ubicaciones: `SELECT id FROM ubicaciones WHERE id = ? AND empresa_id = ?`,
+  herramientas: `SELECT id FROM herramientas WHERE id = ? AND empresa_id = ?`,
+  incidencias: `SELECT i.id FROM incidencias i JOIN herramientas h ON h.id = i.herramienta_id WHERE i.id = ? AND h.empresa_id = ?`,
+  mantenimientos: `SELECT m.id FROM mantenimientos m JOIN herramientas h ON h.id = m.herramienta_id WHERE m.id = ? AND h.empresa_id = ?`,
+};
+function deMiEmpresa(tabla, id, usuario, { opcional = false } = {}) {
+  if (opcional && (id === null || id === undefined || id === '')) return null;
+  if (!get(DE_EMPRESA[tabla], Number(id), usuario.empresa_id)) throw new HttpError(tabla === 'ubicaciones' || tabla === 'personas' ? 400 : 404, 'No encontrado');
+  return Number(id);
+}
+
 // Autenticación ---------------------------------------------------------------
 const DEMO = process.env.DEMO !== '0';   // muestra accesos rápidos en la pantalla de login
-const RUTAS_PUBLICAS = new Set(['/api/config', '/api/login', '/api/demo-usuarios', '/api/primer-admin']);
-const SQL_USUARIO = `SELECT id, nombre, apellidos, email, cargo, telefono, rol FROM personas`;
+const RUTAS_PUBLICAS = new Set(['/api/config', '/api/login', '/api/demo-usuarios', '/api/primer-admin', '/api/empresas']);
+const SQL_USUARIO = `SELECT personas.id, personas.nombre, apellidos, email, cargo, telefono, rol, empresa_id,
+  (SELECT nombre FROM empresas WHERE empresas.id = personas.empresa_id) AS empresa_nombre FROM personas`;
 
 function usuarioDeSesion(req) {
   const m = /^Bearer\s+([a-f0-9]{48})$/i.exec(req.headers.authorization || '');
@@ -249,19 +272,38 @@ function normalizarEmail(d, id = 0) {
 function iniciarSesion(id) {
   const token = crypto.randomBytes(24).toString('hex');
   run(`INSERT INTO sesiones (token, persona_id, expira_en) VALUES (?, ?, datetime('now','localtime','+30 days'))`, token, id);
-  return { token, usuario: get(`${SQL_USUARIO} WHERE id = ?`, id) };
+  return { token, usuario: get(`${SQL_USUARIO} WHERE personas.id = ?`, id) };
 }
 
 // Primer arranque de una instalación vacía: crea el administrador y el almacén inicial
-ruta('POST', '/api/primer-admin', (q, p, body) => tx(() => {
-  if (get(`SELECT COUNT(*) AS n FROM personas`).n) throw new HttpError(409, 'La aplicación ya está configurada');
+function crearAdministrador(empresa, body) {
   const d = pick(body, ['nombre', 'apellidos', 'email', 'cargo']);
   if (!d.nombre || !d.email) throw new HttpError(400, 'Nombre y email son obligatorios');
   comprobarPassword(body.password);
   normalizarEmail(d);
-  const id = insertar('personas', { ...d, rol: 'admin', password_hash: hashPassword(body.password) });
-  if (!get(`SELECT id FROM ubicaciones LIMIT 1`)) insertar('ubicaciones', { nombre: 'Almacén', tipo: 'Almacén', responsable_id: id });
-  return iniciarSesion(id);
+  const id = insertar('personas', { ...d, empresa_id: empresa, rol: 'admin', password_hash: hashPassword(body.password) });
+  if (!get(`SELECT id FROM ubicaciones WHERE empresa_id = ?`, empresa)) {
+    insertar('ubicaciones', { empresa_id: empresa, nombre: 'Almacén', tipo: 'Almacén', responsable_id: id });
+  }
+  return id;
+}
+ruta('POST', '/api/primer-admin', (q, p, body) => tx(() => {
+  if (get(`SELECT COUNT(*) AS n FROM personas`).n) throw new HttpError(409, 'La aplicación ya está configurada');
+  const empresa = String(body.empresa || '').trim();
+  if (empresa) run(`UPDATE empresas SET nombre = ? WHERE id = 1`, empresa);
+  return iniciarSesion(crearAdministrador(1, body));
+}));
+
+// Alta de una empresa cliente en el servidor común. Solo con la clave de alta del propietario del servicio
+// (variable CLAVE_ALTA; sin ella, el alta está desactivada).
+ruta('POST', '/api/empresas', (q, p, body) => tx(() => {
+  const clave = typeof process !== 'undefined' ? process.env.CLAVE_ALTA || '' : '';
+  if (clave.length < 16 || String(body.clave || '') !== clave) throw new HttpError(403, 'Clave de alta no válida');
+  const nombre = String(body.empresa || '').trim();
+  if (!nombre) throw new HttpError(400, 'Indica el nombre de la empresa');
+  const empresa = insertar('empresas', { nombre });
+  const admin = crearAdministrador(empresa, body);
+  return { empresa_id: empresa, admin_id: admin };
 }));
 
 ruta('POST', '/api/login', (q, p, body) => {
@@ -291,27 +333,30 @@ ruta('POST', '/api/yo/password', (q, p, body, usuario, req) => {
   return { ok: true };
 });
 
-ruta('GET', '/api/dashboard', () => {
+ruta('GET', '/api/dashboard', (q, p, b, usuario) => {
+  const e = usuario.empresa_id;
   const c = get(`SELECT COUNT(*) AS total,
       SUM(estado='Disponible') AS disponibles, SUM(estado='En uso') AS en_uso,
       SUM(estado='Averiada') AS averiadas, SUM(estado='En reparación') AS en_reparacion,
-      SUM(estado='Retirada') AS retiradas FROM herramientas`);
-  c.incidencias_abiertas = get(`SELECT COUNT(*) AS n FROM incidencias WHERE estado <> 'Resuelta'`).n;
-  c.mantenimientos_vencidos = get(`SELECT COUNT(*) AS n FROM mantenimientos WHERE estado='Programado' AND fecha_prevista < ?`, hoy()).n;
+      SUM(estado='Retirada') AS retiradas FROM herramientas WHERE empresa_id = ?`, e);
+  c.incidencias_abiertas = get(`SELECT COUNT(*) AS n FROM incidencias i JOIN herramientas h ON h.id = i.herramienta_id
+    WHERE h.empresa_id = ? AND i.estado <> 'Resuelta'`, e).n;
+  c.mantenimientos_vencidos = get(`SELECT COUNT(*) AS n FROM mantenimientos m JOIN herramientas h ON h.id = m.herramienta_id
+    WHERE h.empresa_id = ? AND m.estado='Programado' AND m.fecha_prevista < ?`, e, hoy()).n;
   return {
     indicadores: c,
-    ultimos_movimientos: all(`${SQL_MOV} ORDER BY m.fecha_hora DESC, m.id DESC LIMIT 8`),
-    incidencias: all(`${SQL_INC} WHERE i.estado <> 'Resuelta' ORDER BY ${ORDEN_PRIORIDAD}, i.fecha LIMIT 6`).map(parseFotos),
-    mantenimientos: all(`${SQL_MAN} WHERE m.estado='Programado' ORDER BY m.fecha_prevista LIMIT 6`),
+    ultimos_movimientos: all(`${SQL_MOV} WHERE h.empresa_id = ? ORDER BY m.fecha_hora DESC, m.id DESC LIMIT 8`, e),
+    incidencias: all(`${SQL_INC} WHERE h.empresa_id = ? AND i.estado <> 'Resuelta' ORDER BY ${ORDEN_PRIORIDAD}, i.fecha LIMIT 6`, e).map(parseFotos),
+    mantenimientos: all(`${SQL_MAN} WHERE h.empresa_id = ? AND m.estado='Programado' ORDER BY m.fecha_prevista LIMIT 6`, e),
     por_ubicacion: all(`SELECT u.id, u.nombre, u.tipo, COUNT(h.id) AS n FROM ubicaciones u
       JOIN herramientas h ON h.ubicacion_actual_id = u.id AND h.estado <> 'Retirada'
-      GROUP BY u.id ORDER BY n DESC`),
+      WHERE u.empresa_id = ? GROUP BY u.id ORDER BY n DESC`, e),
   };
 });
 
 // Herramientas -------------------------------------------------------------
-ruta('GET', '/api/herramientas', (q) => {
-  const w = [], p = [];
+ruta('GET', '/api/herramientas', (q, _, b, usuario) => {
+  const w = ['empresa_id = ?'], p = [usuario.empresa_id];
   if (q.q) {
     w.push(`(codigo LIKE ? OR nombre LIKE ? OR marca LIKE ? OR modelo LIKE ? OR numero_serie LIKE ?
              OR categoria LIKE ? OR ubicacion_nombre LIKE ? OR responsable_nombre LIKE ?)`);
@@ -322,11 +367,11 @@ ruta('GET', '/api/herramientas', (q) => {
   if (q.ubicacion) { w.push('ubicacion_actual_id = ?'); p.push(Number(q.ubicacion)); }
   if (q.responsable) { w.push('responsable_actual_id = ?'); p.push(Number(q.responsable)); }
   if (!q.estado && q.retiradas !== '1') w.push(`estado <> 'Retirada'`);
-  return all(`SELECT * FROM v_herramientas ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY codigo`, ...p);
+  return all(`SELECT * FROM v_herramientas WHERE ${w.join(' AND ')} ORDER BY codigo`, ...p);
 });
 
-ruta('GET', '/api/herramientas/:ref', (q, p) => {
-  const h = buscarHerramienta(decodeURIComponent(p.ref));
+ruta('GET', '/api/herramientas/:ref', (q, p, b, usuario) => {
+  const h = buscarHerramienta(decodeURIComponent(p.ref), usuario.empresa_id);
   return {
     ...h,
     movimientos: all(`${SQL_MOV} WHERE m.herramienta_id = ? ORDER BY m.fecha_hora DESC, m.id DESC`, h.id),
@@ -335,21 +380,23 @@ ruta('GET', '/api/herramientas/:ref', (q, p) => {
   };
 });
 
-ruta('GET', '/api/siguiente-codigo', (q) => ({ codigo: siguienteCodigo(q.prefijo || PREFIJOS[q.categoria]) }));
+ruta('GET', '/api/siguiente-codigo', (q, p, b, usuario) => ({ codigo: siguienteCodigo(q.prefijo || PREFIJOS[q.categoria], usuario.empresa_id) }));
 
-ruta('POST', '/api/herramientas', soloAdmin((q, p, body) => tx(() => {
+ruta('POST', '/api/herramientas', soloAdmin((q, p, body, usuario) => tx(() => {
   const d = pick(body, CAMPOS.herramientas);
   if (!d.nombre) throw new HttpError(400, 'El nombre es obligatorio');
-  d.codigo = (d.codigo || siguienteCodigo(PREFIJOS[d.categoria])).toUpperCase().trim();
+  d.empresa_id = usuario.empresa_id;
+  d.codigo = (d.codigo || siguienteCodigo(PREFIJOS[d.categoria], usuario.empresa_id)).toUpperCase().trim();
   d.qr_token = crypto.randomBytes(5).toString('hex');
   if (body.foto) d.foto = guardarImagen(body.foto);
-  d.ubicacion_actual_id = val(body.ubicacion_actual_id);
-  d.responsable_actual_id = val(body.responsable_actual_id);
+  d.ubicacion_actual_id = deMiEmpresa('ubicaciones', val(body.ubicacion_actual_id), usuario, { opcional: true });
+  d.responsable_actual_id = deMiEmpresa('personas', val(body.responsable_actual_id), usuario, { opcional: true });
   const id = insertar('herramientas', d);
   return get(`SELECT * FROM v_herramientas WHERE id = ?`, id);
 })));
 
-ruta('PUT', '/api/herramientas/:id', soloAdmin((q, p, body) => tx(() => {
+ruta('PUT', '/api/herramientas/:id', soloAdmin((q, p, body, usuario) => tx(() => {
+  deMiEmpresa('herramientas', p.id, usuario);
   const d = pick(body, CAMPOS.herramientas);
   if (d.codigo) d.codigo = String(d.codigo).toUpperCase().trim();
   if ('foto' in body) d.foto = body.foto ? guardarImagen(body.foto) : null;
@@ -364,6 +411,7 @@ function anotar(h, linea) {
   run(`UPDATE herramientas SET observaciones = ? WHERE id = ?`, [h.observaciones, linea].filter(Boolean).join('\n'), h.id);
 }
 ruta('POST', '/api/herramientas/:id/baja', soloAdmin((q, p, body, usuario) => tx(() => {
+  deMiEmpresa('herramientas', p.id, usuario);
   const h = get(`SELECT id, estado, observaciones FROM herramientas WHERE id = ?`, Number(p.id));
   if (!h) throw new HttpError(404, 'Herramienta no encontrada');
   if (h.estado === 'Retirada') throw new HttpError(400, 'La herramienta ya está dada de baja');
@@ -378,6 +426,7 @@ ruta('POST', '/api/herramientas/:id/baja', soloAdmin((q, p, body, usuario) => tx
   return get(`SELECT * FROM v_herramientas WHERE id = ?`, h.id);
 })));
 ruta('POST', '/api/herramientas/:id/reactivar', soloAdmin((q, p, body, usuario) => tx(() => {
+  deMiEmpresa('herramientas', p.id, usuario);
   const h = get(`SELECT h.id, h.estado, h.observaciones, u.tipo FROM herramientas h
     LEFT JOIN ubicaciones u ON u.id = h.ubicacion_actual_id WHERE h.id = ?`, Number(p.id));
   if (!h) throw new HttpError(404, 'Herramienta no encontrada');
@@ -388,31 +437,42 @@ ruta('POST', '/api/herramientas/:id/reactivar', soloAdmin((q, p, body, usuario) 
   return get(`SELECT * FROM v_herramientas WHERE id = ?`, h.id);
 })));
 
-ruta('POST', '/api/herramientas/:id/regenerar-qr', soloAdmin((q, p) => {
+ruta('POST', '/api/herramientas/:id/regenerar-qr', soloAdmin((q, p, b, usuario) => {
+  deMiEmpresa('herramientas', p.id, usuario);
   run(`UPDATE herramientas SET qr_token = ? WHERE id = ?`, crypto.randomBytes(5).toString('hex'), Number(p.id));
   return get(`SELECT * FROM v_herramientas WHERE id = ?`, Number(p.id));
 }));
 
 // Ubicaciones y personas ------------------------------------------------------
-ruta('GET', '/api/ubicaciones', () => all(`
+ruta('GET', '/api/ubicaciones', (q, p, b, usuario) => all(`
   SELECT u.*, NULLIF(TRIM(COALESCE(p.nombre,'')||' '||COALESCE(p.apellidos,'')),'') AS responsable_nombre,
          (SELECT COUNT(*) FROM herramientas h WHERE h.ubicacion_actual_id = u.id AND h.estado <> 'Retirada') AS num_herramientas
     FROM ubicaciones u LEFT JOIN personas p ON p.id = u.responsable_id
-   ORDER BY u.estado, CASE u.tipo WHEN 'Almacén' THEN 0 WHEN 'Obra' THEN 1 WHEN 'Vehículo' THEN 2 ELSE 3 END, u.nombre`));
+   WHERE u.empresa_id = ?
+   ORDER BY u.estado, CASE u.tipo WHEN 'Almacén' THEN 0 WHEN 'Obra' THEN 1 WHEN 'Vehículo' THEN 2 ELSE 3 END, u.nombre`, usuario.empresa_id));
 
-ruta('GET', '/api/personas', () => all(`
+ruta('GET', '/api/personas', (q, p, b, usuario) => all(`
   SELECT p.id, p.nombre, p.apellidos, p.telefono, p.email, p.cargo, p.estado, p.rol,
          p.password_hash IS NOT NULL AS tiene_acceso,
          (SELECT COUNT(*) FROM herramientas h WHERE h.responsable_actual_id = p.id AND h.estado <> 'Retirada') AS num_herramientas
-    FROM personas p WHERE p.eliminado_en IS NULL ORDER BY p.estado, p.nombre, p.apellidos`));
+    FROM personas p WHERE p.empresa_id = ? AND p.eliminado_en IS NULL ORDER BY p.estado, p.nombre, p.apellidos`, usuario.empresa_id));
 
-ruta('POST', '/api/ubicaciones', soloAdmin((q, p, body) => {
+function datosUbicacion(body, usuario, id = 0) {
   const d = pick(body, CAMPOS.ubicaciones);
+  if ('responsable_id' in d) d.responsable_id = deMiEmpresa('personas', d.responsable_id, usuario, { opcional: true });
+  if (d.nombre && get(`SELECT id FROM ubicaciones WHERE empresa_id = ? AND nombre = ? AND id <> ?`, usuario.empresa_id, d.nombre, id)) {
+    throw new HttpError(409, 'Ya existe una ubicación con ese nombre');
+  }
+  return d;
+}
+ruta('POST', '/api/ubicaciones', soloAdmin((q, p, body, usuario) => {
+  const d = datosUbicacion(body, usuario);
   if (!d.nombre) throw new HttpError(400, 'El nombre es obligatorio');
-  return { id: insertar('ubicaciones', d) };
+  return { id: insertar('ubicaciones', { ...d, empresa_id: usuario.empresa_id }) };
 }));
-ruta('PUT', '/api/ubicaciones/:id', soloAdmin((q, p, body) => {
-  actualizar('ubicaciones', Number(p.id), pick(body, CAMPOS.ubicaciones));
+ruta('PUT', '/api/ubicaciones/:id', soloAdmin((q, p, body, usuario) => {
+  const id = deMiEmpresa('ubicaciones', p.id, usuario);
+  actualizar('ubicaciones', id, datosUbicacion(body, usuario, id));
   return { ok: true };
 }));
 
@@ -425,26 +485,26 @@ function datosPersona(body, id) {
   return d;
 }
 // La empresa nunca puede quedarse sin nadie capaz de administrarla
-function exigirOtroAdmin(id) {
-  const otro = get(`SELECT id FROM personas WHERE rol = 'admin' AND estado = 'Activo' AND password_hash IS NOT NULL
-    AND eliminado_en IS NULL AND id <> ?`, id);
+function exigirOtroAdmin(id, empresa) {
+  const otro = get(`SELECT id FROM personas WHERE empresa_id = ? AND rol = 'admin' AND estado = 'Activo' AND password_hash IS NOT NULL
+    AND eliminado_en IS NULL AND id <> ?`, empresa, id);
   if (!otro) throw new HttpError(400, 'Debe quedar al menos un administrador con acceso');
 }
-const personaVigente = id => {
-  const a = get(`SELECT id, rol FROM personas WHERE id = ? AND eliminado_en IS NULL`, id);
+const personaVigente = (id, usuario) => {
+  const a = get(`SELECT id, rol FROM personas WHERE id = ? AND empresa_id = ? AND eliminado_en IS NULL`, id, usuario.empresa_id);
   if (!a) throw new HttpError(404, 'Persona no encontrada');
   return a;
 };
 
-ruta('POST', '/api/personas', soloAdmin((q, p, body) => {
+ruta('POST', '/api/personas', soloAdmin((q, p, body, usuario) => {
   const d = datosPersona(body);
   if (!d.nombre) throw new HttpError(400, 'El nombre es obligatorio');
-  return { id: insertar('personas', d) };
+  return { id: insertar('personas', { ...d, empresa_id: usuario.empresa_id }) };
 }));
 ruta('PUT', '/api/personas/:id', soloAdmin((q, p, body, usuario) => tx(() => {
-  const id = Number(p.id), actual = personaVigente(id);
+  const id = Number(p.id), actual = personaVigente(id, usuario);
   const d = datosPersona(body, id);
-  if (actual.rol === 'admin' && (d.rol === 'empleado' || d.estado === 'Inactivo')) exigirOtroAdmin(id);
+  if (actual.rol === 'admin' && (d.rol === 'empleado' || d.estado === 'Inactivo')) exigirOtroAdmin(id, usuario.empresa_id);
   actualizar('personas', id, d);
   // Una contraseña cambiada por un admin o una baja expulsan las sesiones abiertas de esa persona
   if (d.estado === 'Inactivo' || (d.password_hash && id !== usuario.id)) run(`DELETE FROM sesiones WHERE persona_id = ?`, id);
@@ -454,9 +514,9 @@ ruta('PUT', '/api/personas/:id', soloAdmin((q, p, body, usuario) => tx(() => {
 // Quien aparece en el historial no se puede borrar del todo (el historial es inmutable):
 // se retiran sus datos y su acceso, y solo queda su nombre en los registros pasados.
 ruta('DELETE', '/api/personas/:id', soloAdmin((q, p, b, usuario) => tx(() => {
-  const id = Number(p.id), actual = personaVigente(id);
+  const id = Number(p.id), actual = personaVigente(id, usuario);
   if (id === usuario.id) throw new HttpError(400, 'No puedes eliminar tu propio usuario');
-  if (actual.rol === 'admin') exigirOtroAdmin(id);
+  if (actual.rol === 'admin') exigirOtroAdmin(id, usuario.empresa_id);
   const n = get(`SELECT COUNT(*) AS n FROM herramientas WHERE responsable_actual_id = ? AND estado <> 'Retirada'`, id).n;
   if (n) throw new HttpError(409, `Tiene ${n} herramienta${n === 1 ? '' : 's'} a su cargo. Reasígnala${n === 1 ? '' : 's'} antes de eliminar el usuario.`);
   run(`UPDATE herramientas SET responsable_actual_id = NULL WHERE responsable_actual_id = ?`, id);
@@ -472,11 +532,11 @@ ruta('DELETE', '/api/personas/:id', soloAdmin((q, p, b, usuario) => tx(() => {
 })));
 
 // Movimientos (solo alta y consulta: el historial es inmutable) ---------------
-ruta('GET', '/api/movimientos', (q) => {
-  const w = [], p = [];
+ruta('GET', '/api/movimientos', (q, _, b, usuario) => {
+  const w = ['h.empresa_id = ?'], p = [usuario.empresa_id];
   if (q.herramienta_id) { w.push('m.herramienta_id = ?'); p.push(Number(q.herramienta_id)); }
   if (q.ubicacion) { w.push('(m.origen_id = ? OR m.destino_id = ?)'); p.push(Number(q.ubicacion), Number(q.ubicacion)); }
-  return all(`${SQL_MOV} ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY m.fecha_hora DESC, m.id DESC LIMIT ?`,
+  return all(`${SQL_MOV} WHERE ${w.join(' AND ')} ORDER BY m.fecha_hora DESC, m.id DESC LIMIT ?`,
     ...p, Number(q.limite || 200));
 });
 
@@ -484,11 +544,13 @@ ruta('POST', '/api/movimientos', (q, p, body, usuario) => tx(() => {
   // Un empleado solo registra a su nombre y con la hora real; el admin puede corregir ambos datos
   if (!esAdmin(usuario)) { body.realizado_por_id = usuario.id; body.fecha_hora = null; }
   if (!val(body.realizado_por_id)) body.realizado_por_id = usuario.id;   // por defecto, quien ha iniciado sesión
-  const h = get(`SELECT * FROM herramientas WHERE id = ?`, Number(body.herramienta_id));
+  const h = get(`SELECT * FROM herramientas WHERE id = ? AND empresa_id = ?`, Number(body.herramienta_id), usuario.empresa_id);
   if (!h) throw new HttpError(400, 'Herramienta no válida');
+  deMiEmpresa('personas', val(body.realizado_por_id), usuario, { opcional: true });
+  deMiEmpresa('personas', val(body.receptor_id), usuario, { opcional: true });
   if (h.estado === 'Retirada') throw new HttpError(400, 'La herramienta está retirada');
   if (!['Entrega', 'Traslado', 'Devolución'].includes(body.tipo)) throw new HttpError(400, 'Tipo de movimiento no válido');
-  const destino = get(`SELECT * FROM ubicaciones WHERE id = ?`, Number(body.destino_id));
+  const destino = get(`SELECT * FROM ubicaciones WHERE id = ? AND empresa_id = ?`, Number(body.destino_id), usuario.empresa_id);
   if (!destino) throw new HttpError(400, 'Indica la ubicación de destino');
   if (destino.estado === 'Cerrada') throw new HttpError(400, 'La ubicación de destino está cerrada');
   const id = insertar('movimientos', {
@@ -508,12 +570,12 @@ ruta('PUT', '/api/movimientos/:id', () => { throw new HttpError(405, 'El histori
 ruta('DELETE', '/api/movimientos/:id', () => { throw new HttpError(405, 'El historial de movimientos no se puede borrar'); });
 
 // Incidencias -------------------------------------------------------------------
-ruta('GET', '/api/incidencias', (q) => {
-  const w = [], p = [];
+ruta('GET', '/api/incidencias', (q, _, b, usuario) => {
+  const w = ['h.empresa_id = ?'], p = [usuario.empresa_id];
   if (q.pendientes === '1') w.push(`i.estado <> 'Resuelta'`);
   if (q.estado) { w.push('i.estado = ?'); p.push(q.estado); }
   if (q.herramienta_id) { w.push('i.herramienta_id = ?'); p.push(Number(q.herramienta_id)); }
-  return all(`${SQL_INC} ${w.length ? 'WHERE ' + w.join(' AND ') : ''}
+  return all(`${SQL_INC} WHERE ${w.join(' AND ')}
     ORDER BY i.estado = 'Resuelta', ${ORDEN_PRIORIDAD}, i.fecha DESC`, ...p).map(parseFotos);
 });
 
@@ -522,6 +584,8 @@ ruta('POST', '/api/incidencias', (q, p, body, usuario) => tx(() => {
   if (!esAdmin(usuario)) { d.comunicada_por_id = usuario.id; delete d.estado; delete d.fecha_resolucion; }
   if (!d.comunicada_por_id) d.comunicada_por_id = usuario.id;
   if (!d.herramienta_id) throw new HttpError(400, 'Indica la herramienta');
+  deMiEmpresa('herramientas', d.herramienta_id, usuario);
+  deMiEmpresa('personas', d.comunicada_por_id, usuario, { opcional: true });
   if (!d.descripcion) throw new HttpError(400, 'Describe la incidencia');
   d.fecha = d.fecha || hoy();
   d.fotos = JSON.stringify((body.fotos || []).slice(0, 6).map(guardarImagen).filter(Boolean));
@@ -532,8 +596,11 @@ ruta('POST', '/api/incidencias', (q, p, body, usuario) => tx(() => {
   return parseFotos(get(`${SQL_INC} WHERE i.id = ?`, id));
 }));
 
-ruta('PUT', '/api/incidencias/:id', soloAdmin((q, p, body) => tx(() => {
+ruta('PUT', '/api/incidencias/:id', soloAdmin((q, p, body, usuario) => tx(() => {
+  deMiEmpresa('incidencias', p.id, usuario);
   const d = pick(body, CAMPOS.incidencias);
+  delete d.herramienta_id;
+  if ('comunicada_por_id' in d) deMiEmpresa('personas', d.comunicada_por_id, usuario, { opcional: true });
   if (d.estado === 'Resuelta' && !d.fecha_resolucion) d.fecha_resolucion = hoy();
   if (d.estado && d.estado !== 'Resuelta' && !('fecha_resolucion' in body)) d.fecha_resolucion = null;
   actualizar('incidencias', Number(p.id), d);
@@ -543,23 +610,26 @@ ruta('PUT', '/api/incidencias/:id', soloAdmin((q, p, body) => tx(() => {
 })));
 
 // Mantenimientos ----------------------------------------------------------------
-ruta('GET', '/api/mantenimientos', (q) => {
-  const w = [], p = [];
+ruta('GET', '/api/mantenimientos', (q, _, b, usuario) => {
+  const w = ['h.empresa_id = ?'], p = [usuario.empresa_id];
   if (q.pendientes === '1') w.push(`m.estado = 'Programado'`);
   if (q.herramienta_id) { w.push('m.herramienta_id = ?'); p.push(Number(q.herramienta_id)); }
-  return all(`${SQL_MAN} ${w.length ? 'WHERE ' + w.join(' AND ') : ''}
+  return all(`${SQL_MAN} WHERE ${w.join(' AND ')}
     ORDER BY m.estado <> 'Programado', CASE WHEN m.estado = 'Programado' THEN m.fecha_prevista END ASC,
              COALESCE(m.fecha_realizada, m.fecha_prevista) DESC`, ...p);
 });
 
-ruta('POST', '/api/mantenimientos', soloAdmin((q, p, body) => {
+ruta('POST', '/api/mantenimientos', soloAdmin((q, p, body, usuario) => {
   const d = pick(body, CAMPOS.mantenimientos);
   if (!d.herramienta_id || !d.fecha_prevista) throw new HttpError(400, 'Herramienta y fecha prevista son obligatorias');
+  deMiEmpresa('herramientas', d.herramienta_id, usuario);
   return { id: insertar('mantenimientos', d) };
 }));
 
-ruta('PUT', '/api/mantenimientos/:id', soloAdmin((q, p, body) => {
+ruta('PUT', '/api/mantenimientos/:id', soloAdmin((q, p, body, usuario) => {
+  deMiEmpresa('mantenimientos', p.id, usuario);
   const d = pick(body, CAMPOS.mantenimientos);
+  delete d.herramienta_id;
   if (d.estado === 'Realizado' && !d.fecha_realizada) d.fecha_realizada = hoy();
   actualizar('mantenimientos', Number(p.id), d);
   return { ok: true };
