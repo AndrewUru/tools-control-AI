@@ -4,6 +4,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const root = path.resolve(__dirname, '..');
+// EDICION=cliente: base de datos vacía, sin accesos de demostración; el primer arranque crea el administrador
+const cliente = process.env.EDICION === 'cliente';
 const out = path.join(root, 'android/app/src/main/assets');
 fs.mkdirSync(out, { recursive: true });
 fs.cpSync(path.join(root, 'public'), path.join(out, 'web'), { recursive: true });
@@ -11,7 +13,7 @@ const seedPath = path.join(out, 'demo.db');
 fs.rmSync(seedPath, { force: true });
 const db = new DatabaseSync(seedPath);
 db.exec(fs.readFileSync(path.join(root, 'db/schema.sql'), 'utf8'));
-require('../db/seed')(db);
+if (!cliente) require('../db/seed')(db);
 for (const p of db.prepare('SELECT id FROM personas WHERE password_hash IS NOT NULL').all()) {
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.pbkdf2Sync('demo', salt, 120000, 32, 'sha256').toString('hex');
@@ -27,7 +29,7 @@ source = source.replace(/function guardarImagen\(dataUrl\) \{[\s\S]*?\n\}/, `fun
   return dataUrl;
 }`);
 source = source.replace(/function ipLocal\(\) \{[\s\S]*?const PUBLIC_URL = [^\n]+;/, "const PUBLIC_URL = location.origin;");
-source = source.replace("const DEMO = process.env.DEMO !== '0';", 'const DEMO = true;');
+source = source.replace("const DEMO = process.env.DEMO !== '0';", `const DEMO = ${!cliente};`);
 const adapter = fs.readFileSync(path.join(__dirname, 'offline-adapter.js'), 'utf8');
 fs.writeFileSync(path.join(out, 'web/offline.js'), '(() => {\n' + adapter + '\n' + source + '\n' + `
 window.fetch = async (input, options = {}) => {
@@ -52,4 +54,4 @@ window.print = () => Android.print(document.querySelector('#label-format')?.valu
 })();\n`);
 const htmlPath = path.join(out, 'web/index.html');
 fs.writeFileSync(htmlPath, fs.readFileSync(htmlPath, 'utf8').replace('<script src="app.js">', '<script src="offline.js"></script>\n  <script src="app.js">'));
-console.log('Android assets ready: offline UI, API and fresh demo database.');
+console.log(`Android assets ready: offline UI, API and fresh ${cliente ? 'empty' : 'demo'} database.`);

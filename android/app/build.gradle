@@ -6,8 +6,8 @@ android {
         applicationId 'es.herramientas.inventario'
         minSdk 26
         targetSdk 36
-        versionCode 7
-        versionName '1.6-baja'
+        versionCode 8
+        versionName '1.7-roles'
         testInstrumentationRunner 'es.herramientas.inventario.OfflineSmokeTest'
     }
 }

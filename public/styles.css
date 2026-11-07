@@ -488,12 +488,16 @@ dialog.sheet::backdrop { background: rgba(2, 6, 23, .45); animation: fade .2s bo
 .sheet-head h3 { font-size: 1.1rem; }
 .scanner video { width: 100%; border-radius: var(--radius); background: #000; aspect-ratio: 1; object-fit: cover; }
 
+.persona-tags { display: flex; flex-wrap: wrap; gap: .1rem .6rem; margin-top: .15rem; }
+.persona-tags > span { white-space: nowrap; }
+
 /* --- Etiquetas QR --- */
 .labels { display: grid; gap: 8px; grid-template-columns: 1fr 1fr; }
 .label-qr { border: 1px dashed var(--border); border-radius: 10px; padding: 6px; display: flex; gap: 6px; align-items: center; background: #fff; color: #000; break-inside: avoid; min-width: 0; }
 .label-qr svg { width: 72px; height: 72px; flex: none; }
-.label-qr .c { font: 700 .92rem ui-monospace, Consolas, monospace; }
-.label-qr .n { font-size: .68rem; overflow-wrap: anywhere; }
+.label-qr .c { font: 600 .72rem ui-monospace, Consolas, monospace; }
+.label-qr .n { font-size: .82rem; font-weight: 700; line-height: 1.15; overflow-wrap: anywhere; }
+.label-qr .m { font-size: .68rem; }
 .label-settings { display: grid; gap: 12px; padding: 16px; }
 .label-settings label { display: grid; gap: 6px; min-width: 0; }
 .label-selection { max-height: 240px; overflow-y: auto; }
@@ -506,8 +510,10 @@ dialog.sheet::backdrop { background: rgba(2, 6, 23, .45); animation: fade .2s bo
 .label-text .c { overflow-wrap: anywhere; }
 .label-text .n { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 #scan-manual { display: grid; gap: 12px; }
-.label-only-qr .label-qr { justify-content: center; }
+.label-only-qr .label-qr { flex-direction: column; justify-content: center; gap: 2px; text-align: center; }
 .label-only-qr .label-qr svg { width: 110px; height: 110px; }
+.label-only-qr .label-text { width: 100%; }
+.label-only-qr .label-text .n { -webkit-line-clamp: 1; }
 
 @media print {
   body { background: #fff; }
@@ -529,8 +535,11 @@ dialog.sheet::backdrop { background: rgba(2, 6, 23, .45); animation: fade .2s bo
     padding: 1mm; gap: 1mm; border: .2mm solid #aaa; overflow: hidden; box-shadow: none; }
   .label-roll .label-qr { border: none; }
   .label-sheet .label-qr svg { width: var(--label-qr); height: var(--label-qr); }
-  .label-sheet.label-only-qr .label-qr { justify-content: center; padding: 0; }
-  .label-sheet .c { font-size: 8pt; line-height: 1.15; }
-  .label-sheet .n { font-size: 6.5pt; line-height: 1.15; }
+  .label-sheet.label-only-qr .label-qr { justify-content: flex-start; padding: .5mm 1mm 0; gap: 0; }
+  .label-sheet .n { font-size: 8pt; line-height: 1.12; }
+  .label-sheet .c { font-size: 7pt; line-height: 1.15; }
+  .label-sheet .m { font-size: 6.5pt; line-height: 1.15; }
+  .label-sheet.label-only-qr .n { font-size: 7pt; }
+  .label-sheet.label-only-qr .c { font-size: 6pt; }
   #label-preview { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
 }

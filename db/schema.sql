@@ -12,7 +12,9 @@ CREATE TABLE IF NOT EXISTS personas (
   email      TEXT,
   cargo      TEXT,
   estado     TEXT NOT NULL DEFAULT 'Activo' CHECK (estado IN ('Activo','Inactivo')),
-  password_hash TEXT                                   -- acceso a la app (NULL = sin acceso)
+  password_hash TEXT,                                  -- acceso a la app (NULL = sin acceso)
+  rol        TEXT NOT NULL DEFAULT 'empleado' CHECK (rol IN ('admin','empleado')),
+  eliminado_en TEXT                                    -- usuario eliminado que se conserva solo por el historial
 );
 
 -- Sesiones de usuario (login)

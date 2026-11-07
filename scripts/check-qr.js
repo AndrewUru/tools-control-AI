@@ -56,7 +56,7 @@ const server = spawn(process.execPath, ['server.js'], {
       await page.emulateMedia({ media: 'screen' });
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     }
-    // QR-only labels: the code fills the short side and still decodes at 300 dpi.
+    // Compact labels: bigger QR with the name underneath, still decoding at 300 dpi.
     await page.selectOption('#label-content', 'qr');
     for (const format of formats) {
       await page.selectOption('#label-format', format);
@@ -75,12 +75,14 @@ const server = spawn(process.execPath, ['server.js'], {
         ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
         const decoded = jsQR(ctx.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height);
         const box = label.getBoundingClientRect();
-        return { decoded: decoded?.data, text: !!label.querySelector('.label-text'), qr: rect.width * 25.4 / 96, w: box.width * 25.4 / 96, h: box.height * 25.4 / 96 };
+        return { decoded: decoded?.data, text: !!label.querySelector('.label-text .n')?.textContent.trim(),
+          clipped: label.querySelector('.label-text').getBoundingClientRect().bottom > box.bottom + .5, qr: rect.width * 25.4 / 96, w: box.width * 25.4 / 96, h: box.height * 25.4 / 96 };
       });
       const [w, h] = { 'a4-pequena': [48, 25], 'a4-mediana': [60, 40], 'a4-grande': [90, 60], rollo50: [50, 30], rollo100: [100, 50] }[format];
       assert.match(r.decoded, /\/h\/[a-f0-9]+$/, 'QR-only does not decode: ' + format);
-      assert.equal(r.text, false);
-      assert(Math.abs(r.qr - (Math.min(w, h) - 2)) < .1, 'QR-only size: ' + format);
+      assert.equal(r.text, true, 'Label without tool name: ' + format);
+      assert.equal(r.clipped, false, 'Label text clipped: ' + format);
+      assert(Math.abs(r.qr - Math.min(w - 2, h - 7)) < .1, 'QR-only size: ' + format);
       assert(Math.abs(r.w - w) < .1 && Math.abs(r.h - h) < .1, 'QR-only label size: ' + format);
       await page.pdf({ path: path.join(out, 'solo-qr-' + format + '.pdf'), preferCSSPageSize: true });
       await page.emulateMedia({ media: 'screen' });

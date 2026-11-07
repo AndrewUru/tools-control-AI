@@ -46,3 +46,22 @@ Requiere Node.js 22.13+, Android SDK 36 y el JDK de Android Studio. `ANDROID_HOM
 El generador copia la interfaz de `public`, adapta las rutas de `server.js` a SQLite nativo y genera una base nueva a partir de `db/schema.sql` y `db/seed.js`. El proyecto web sigue usando su servidor original. Los recursos Android generados se excluyen de Git; hay que generarlos antes de compilar desde Android Studio.
 
 Referencia del selector de archivos WebView: https://developer.android.com/reference/android/webkit/WebChromeClient#onShowFileChooser(android.webkit.WebView,android.webkit.ValueCallback%3Candroid.net.Uri[]%3E,android.webkit.WebChromeClient.FileChooserParams)
+
+## APK para clientes
+
+`powershell -File scripts/build-android.ps1 -Edicion cliente` genera `dist/android/herramientas-cliente.apk`: sin datos ni accesos de demostración. El primer arranque pide crear el administrador y un almacén inicial. Sin parámetros se genera la APK de demostración.
+
+Cada instalación guarda sus datos solo en ese teléfono: no se comparten entre dispositivos y se pierden al desinstalar. La APK actual va firmada con la clave de depuración.
+
+## Permisos
+
+| Acción | Empleado | Administrador |
+|---|---|---|
+| Consultar inventario, historial, personas | Sí | Sí |
+| Registrar movimientos y comunicar incidencias | Sí, a su nombre y con la hora real | Sí |
+| Cambiar su contraseña | Sí | Sí |
+| Alta, edición y baja de herramientas; etiquetas QR | No | Sí |
+| Cambiar estado de incidencias; mantenimientos | No | Sí |
+| Ubicaciones; personas y sus permisos; eliminar usuarios | No | Sí |
+
+Al actualizar una base anterior a los roles, pasan a administrador las personas con cargo de jefe, encargado, administración o gerente; si no hay ninguna, la primera con acceso. Debe quedar siempre un administrador. Un usuario con historial se retira sin borrar su nombre de esos registros.

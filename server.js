@@ -38,6 +38,21 @@ const all = (sql, ...p) => db.prepare(sql).all(...p);
 const get = (sql, ...p) => db.prepare(sql).get(...p);
 const run = (sql, ...p) => db.prepare(sql).run(...p);
 
+// Bases de datos anteriores a los roles (también las ya instaladas en Android).
+// Garantiza además que siempre haya un administrador con acceso.
+function asegurarRoles() {
+  const cols = all(`PRAGMA table_info(personas)`).map(c => c.name);
+  if (!cols.includes('rol')) db.exec(`ALTER TABLE personas ADD COLUMN rol TEXT NOT NULL DEFAULT 'empleado' CHECK (rol IN ('admin','empleado'))`);
+  if (!cols.includes('eliminado_en')) db.exec(`ALTER TABLE personas ADD COLUMN eliminado_en TEXT`);
+  const conAcceso = `estado = 'Activo' AND password_hash IS NOT NULL AND eliminado_en IS NULL`;
+  if (get(`SELECT id FROM personas WHERE rol = 'admin' AND ${conAcceso}`)) return;
+  run(`UPDATE personas SET rol = 'admin' WHERE ${conAcceso} AND (lower(cargo) LIKE '%jefe%'
+    OR lower(cargo) LIKE '%encargad%' OR lower(cargo) LIKE '%administra%' OR lower(cargo) LIKE '%gerente%')`);
+  if (get(`SELECT id FROM personas WHERE rol = 'admin' AND ${conAcceso}`)) return;
+  run(`UPDATE personas SET rol = 'admin' WHERE id = (SELECT MIN(id) FROM personas WHERE ${conAcceso})`);
+}
+asegurarRoles();
+
 function tx(fn) {
   db.exec('BEGIN');
   try { const r = fn(); db.exec('COMMIT'); return r; }
@@ -117,7 +132,7 @@ const PUBLIC_URL = (process.env.PUBLIC_URL || `http://${ipLocal()}:${PORT}`).rep
 // Campos editables por tabla
 // ---------------------------------------------------------------------------
 const CAMPOS = {
-  personas: ['nombre', 'apellidos', 'telefono', 'email', 'cargo', 'estado'],
+  personas: ['nombre', 'apellidos', 'telefono', 'email', 'cargo', 'estado', 'rol'],
   ubicaciones: ['nombre', 'tipo', 'direccion', 'responsable_id', 'estado', 'observaciones'],
   // ubicacion_actual_id / responsable_actual_id solo se fijan en el alta; luego cambian vía movimientos
   herramientas: ['codigo', 'nombre', 'categoria', 'marca', 'modelo', 'numero_serie', 'estado',
@@ -192,10 +207,18 @@ const ruta = (metodo, patron, fn) => {
   rutas.push({ metodo, re, claves, fn });
 };
 
+// Permisos: los empleados consultan, registran movimientos y comunican incidencias.
+// Lo demás se comprueba aquí, en la API: ocultar un botón no protege nada.
+const esAdmin = u => u?.rol === 'admin';
+const soloAdmin = fn => (q, p, b, usuario, req) => {
+  if (!esAdmin(usuario)) throw new HttpError(403, 'Esta acción solo la puede realizar un administrador');
+  return fn(q, p, b, usuario, req);
+};
+
 // Autenticación ---------------------------------------------------------------
 const DEMO = process.env.DEMO !== '0';   // muestra accesos rápidos en la pantalla de login
-const RUTAS_PUBLICAS = new Set(['/api/config', '/api/login', '/api/demo-usuarios']);
-const SQL_USUARIO = `SELECT id, nombre, apellidos, email, cargo, telefono FROM personas`;
+const RUTAS_PUBLICAS = new Set(['/api/config', '/api/login', '/api/demo-usuarios', '/api/primer-admin']);
+const SQL_USUARIO = `SELECT id, nombre, apellidos, email, cargo, telefono, rol FROM personas`;
 
 function usuarioDeSesion(req) {
   const m = /^Bearer\s+([a-f0-9]{48})$/i.exec(req.headers.authorization || '');
@@ -204,11 +227,42 @@ function usuarioDeSesion(req) {
      WHERE s.token = ? AND s.expira_en > datetime('now','localtime') AND personas.estado = 'Activo'`, m[1]) || null;
 }
 
-ruta('GET', '/api/config', () => ({ publicUrl: PUBLIC_URL, prefijos: PREFIJOS, demo: DEMO }));
+ruta('GET', '/api/config', () => ({
+  publicUrl: PUBLIC_URL, prefijos: PREFIJOS, demo: DEMO,
+  primerUso: get(`SELECT COUNT(*) AS n FROM personas`).n === 0,
+}));
 
 ruta('GET', '/api/demo-usuarios', () => DEMO
   ? all(`SELECT nombre, apellidos, email, cargo FROM personas WHERE estado = 'Activo' AND password_hash IS NOT NULL ORDER BY nombre LIMIT 6`)
   : []);
+
+function comprobarPassword(password) {
+  if (String(password || '').length < 6) throw new HttpError(400, 'La contraseña debe tener al menos 6 caracteres');
+}
+function normalizarEmail(d, id = 0) {
+  if (!d.email) return;
+  d.email = String(d.email).trim().toLowerCase();
+  if (get(`SELECT id FROM personas WHERE lower(email) = ? AND id <> ?`, d.email, id)) {
+    throw new HttpError(409, 'Ya existe una persona con ese email');
+  }
+}
+function iniciarSesion(id) {
+  const token = crypto.randomBytes(24).toString('hex');
+  run(`INSERT INTO sesiones (token, persona_id, expira_en) VALUES (?, ?, datetime('now','localtime','+30 days'))`, token, id);
+  return { token, usuario: get(`${SQL_USUARIO} WHERE id = ?`, id) };
+}
+
+// Primer arranque de una instalación vacía: crea el administrador y el almacén inicial
+ruta('POST', '/api/primer-admin', (q, p, body) => tx(() => {
+  if (get(`SELECT COUNT(*) AS n FROM personas`).n) throw new HttpError(409, 'La aplicación ya está configurada');
+  const d = pick(body, ['nombre', 'apellidos', 'email', 'cargo']);
+  if (!d.nombre || !d.email) throw new HttpError(400, 'Nombre y email son obligatorios');
+  comprobarPassword(body.password);
+  normalizarEmail(d);
+  const id = insertar('personas', { ...d, rol: 'admin', password_hash: hashPassword(body.password) });
+  if (!get(`SELECT id FROM ubicaciones LIMIT 1`)) insertar('ubicaciones', { nombre: 'Almacén', tipo: 'Almacén', responsable_id: id });
+  return iniciarSesion(id);
+}));
 
 ruta('POST', '/api/login', (q, p, body) => {
   const email = String(body.email || '').trim().toLowerCase();
@@ -216,9 +270,7 @@ ruta('POST', '/api/login', (q, p, body) => {
   if (!fila || fila.estado !== 'Activo' || !verificarPassword(body.password || '', fila.password_hash)) {
     throw new HttpError(401, 'Email o contraseña incorrectos');
   }
-  const token = crypto.randomBytes(24).toString('hex');
-  run(`INSERT INTO sesiones (token, persona_id, expira_en) VALUES (?, ?, datetime('now','localtime','+30 days'))`, token, fila.id);
-  return { token, usuario: get(`${SQL_USUARIO} WHERE id = ?`, fila.id) };
+  return iniciarSesion(fila.id);
 });
 
 ruta('POST', '/api/logout', (q, p, b, usuario, req) => {
@@ -228,6 +280,16 @@ ruta('POST', '/api/logout', (q, p, b, usuario, req) => {
 });
 
 ruta('GET', '/api/yo', (q, p, b, usuario) => usuario);
+
+ruta('POST', '/api/yo/password', (q, p, body, usuario, req) => {
+  const fila = get(`SELECT password_hash FROM personas WHERE id = ?`, usuario.id);
+  if (!verificarPassword(body.actual || '', fila.password_hash)) throw new HttpError(400, 'La contraseña actual no es correcta');
+  comprobarPassword(body.nueva);
+  run(`UPDATE personas SET password_hash = ? WHERE id = ?`, hashPassword(body.nueva), usuario.id);
+  const token = (/^Bearer\s+(\w+)$/i.exec(req.headers.authorization || '') || [])[1] || '';
+  run(`DELETE FROM sesiones WHERE persona_id = ? AND token <> ?`, usuario.id, token);   // cierra los demás dispositivos
+  return { ok: true };
+});
 
 ruta('GET', '/api/dashboard', () => {
   const c = get(`SELECT COUNT(*) AS total,
@@ -275,7 +337,7 @@ ruta('GET', '/api/herramientas/:ref', (q, p) => {
 
 ruta('GET', '/api/siguiente-codigo', (q) => ({ codigo: siguienteCodigo(q.prefijo || PREFIJOS[q.categoria]) }));
 
-ruta('POST', '/api/herramientas', (q, p, body) => tx(() => {
+ruta('POST', '/api/herramientas', soloAdmin((q, p, body) => tx(() => {
   const d = pick(body, CAMPOS.herramientas);
   if (!d.nombre) throw new HttpError(400, 'El nombre es obligatorio');
   d.codigo = (d.codigo || siguienteCodigo(PREFIJOS[d.categoria])).toUpperCase().trim();
@@ -285,15 +347,15 @@ ruta('POST', '/api/herramientas', (q, p, body) => tx(() => {
   d.responsable_actual_id = val(body.responsable_actual_id);
   const id = insertar('herramientas', d);
   return get(`SELECT * FROM v_herramientas WHERE id = ?`, id);
-}));
+})));
 
-ruta('PUT', '/api/herramientas/:id', (q, p, body) => tx(() => {
+ruta('PUT', '/api/herramientas/:id', soloAdmin((q, p, body) => tx(() => {
   const d = pick(body, CAMPOS.herramientas);
   if (d.codigo) d.codigo = String(d.codigo).toUpperCase().trim();
   if ('foto' in body) d.foto = body.foto ? guardarImagen(body.foto) : null;
   actualizar('herramientas', Number(p.id), d);
   return get(`SELECT * FROM v_herramientas WHERE id = ?`, Number(p.id));
-}));
+})));
 
 // Baja: la herramienta pasa a «Retirada» y deja constancia del motivo en sus observaciones
 const MOTIVOS_BAJA = ['Rotura irreparable', 'Pérdida o robo', 'Desgaste u obsoleta', 'Venta o donación', 'Otro'];
@@ -301,7 +363,7 @@ const fechaES = f => f.split('-').reverse().join('/');
 function anotar(h, linea) {
   run(`UPDATE herramientas SET observaciones = ? WHERE id = ?`, [h.observaciones, linea].filter(Boolean).join('\n'), h.id);
 }
-ruta('POST', '/api/herramientas/:id/baja', (q, p, body, usuario) => tx(() => {
+ruta('POST', '/api/herramientas/:id/baja', soloAdmin((q, p, body, usuario) => tx(() => {
   const h = get(`SELECT id, estado, observaciones FROM herramientas WHERE id = ?`, Number(p.id));
   if (!h) throw new HttpError(404, 'Herramienta no encontrada');
   if (h.estado === 'Retirada') throw new HttpError(400, 'La herramienta ya está dada de baja');
@@ -314,8 +376,8 @@ ruta('POST', '/api/herramientas/:id/baja', (q, p, body, usuario) => tx(() => {
   const quien = usuario ? `${usuario.nombre} ${usuario.apellidos || ''}`.trim() : '';
   anotar(h, `Baja ${fechaES(fecha)}: ${motivo}${quien ? ` (${quien})` : ''}${nota ? `. ${nota}` : ''}`);
   return get(`SELECT * FROM v_herramientas WHERE id = ?`, h.id);
-}));
-ruta('POST', '/api/herramientas/:id/reactivar', (q, p, body, usuario) => tx(() => {
+})));
+ruta('POST', '/api/herramientas/:id/reactivar', soloAdmin((q, p, body, usuario) => tx(() => {
   const h = get(`SELECT h.id, h.estado, h.observaciones, u.tipo FROM herramientas h
     LEFT JOIN ubicaciones u ON u.id = h.ubicacion_actual_id WHERE h.id = ?`, Number(p.id));
   if (!h) throw new HttpError(404, 'Herramienta no encontrada');
@@ -324,12 +386,12 @@ ruta('POST', '/api/herramientas/:id/reactivar', (q, p, body, usuario) => tx(() =
   const quien = usuario ? `${usuario.nombre} ${usuario.apellidos || ''}`.trim() : '';
   anotar(h, `Reactivada ${fechaES(get(`SELECT date('now','localtime') AS d`).d)}${quien ? ` (${quien})` : ''}`);
   return get(`SELECT * FROM v_herramientas WHERE id = ?`, h.id);
-}));
+})));
 
-ruta('POST', '/api/herramientas/:id/regenerar-qr', (q, p) => {
+ruta('POST', '/api/herramientas/:id/regenerar-qr', soloAdmin((q, p) => {
   run(`UPDATE herramientas SET qr_token = ? WHERE id = ?`, crypto.randomBytes(5).toString('hex'), Number(p.id));
   return get(`SELECT * FROM v_herramientas WHERE id = ?`, Number(p.id));
-});
+}));
 
 // Ubicaciones y personas ------------------------------------------------------
 ruta('GET', '/api/ubicaciones', () => all(`
@@ -339,29 +401,75 @@ ruta('GET', '/api/ubicaciones', () => all(`
    ORDER BY u.estado, CASE u.tipo WHEN 'Almacén' THEN 0 WHEN 'Obra' THEN 1 WHEN 'Vehículo' THEN 2 ELSE 3 END, u.nombre`));
 
 ruta('GET', '/api/personas', () => all(`
-  SELECT p.id, p.nombre, p.apellidos, p.telefono, p.email, p.cargo, p.estado,
+  SELECT p.id, p.nombre, p.apellidos, p.telefono, p.email, p.cargo, p.estado, p.rol,
          p.password_hash IS NOT NULL AS tiene_acceso,
          (SELECT COUNT(*) FROM herramientas h WHERE h.responsable_actual_id = p.id AND h.estado <> 'Retirada') AS num_herramientas
-    FROM personas p ORDER BY p.estado, p.nombre, p.apellidos`));
+    FROM personas p WHERE p.eliminado_en IS NULL ORDER BY p.estado, p.nombre, p.apellidos`));
 
-for (const t of ['ubicaciones', 'personas']) {
-  // En personas, un campo "password" con valor asigna o cambia la contraseña de acceso
-  const datos = body => {
-    const d = pick(body, CAMPOS[t]);
-    if (t === 'personas' && body.password) d.password_hash = hashPassword(body.password);
-    return d;
-  };
-  ruta('POST', `/api/${t}`, (q, p, body) => {
-    const d = datos(body);
-    if (!d.nombre) throw new HttpError(400, 'El nombre es obligatorio');
-    return { id: insertar(t, d) };
-  });
-  ruta('PUT', `/api/${t}/:id`, (q, p, body) => {
-    actualizar(t, Number(p.id), datos(body));
-    if (t === 'personas' && body.estado === 'Inactivo') run(`DELETE FROM sesiones WHERE persona_id = ?`, Number(p.id));
-    return { ok: true };
-  });
+ruta('POST', '/api/ubicaciones', soloAdmin((q, p, body) => {
+  const d = pick(body, CAMPOS.ubicaciones);
+  if (!d.nombre) throw new HttpError(400, 'El nombre es obligatorio');
+  return { id: insertar('ubicaciones', d) };
+}));
+ruta('PUT', '/api/ubicaciones/:id', soloAdmin((q, p, body) => {
+  actualizar('ubicaciones', Number(p.id), pick(body, CAMPOS.ubicaciones));
+  return { ok: true };
+}));
+
+// Un campo "password" con valor asigna o cambia la contraseña de acceso
+function datosPersona(body, id) {
+  const d = pick(body, CAMPOS.personas);
+  if ('rol' in d && !['admin', 'empleado'].includes(d.rol)) throw new HttpError(400, 'Rol no válido');
+  normalizarEmail(d, id);
+  if (body.password) { comprobarPassword(body.password); d.password_hash = hashPassword(body.password); }
+  return d;
 }
+// La empresa nunca puede quedarse sin nadie capaz de administrarla
+function exigirOtroAdmin(id) {
+  const otro = get(`SELECT id FROM personas WHERE rol = 'admin' AND estado = 'Activo' AND password_hash IS NOT NULL
+    AND eliminado_en IS NULL AND id <> ?`, id);
+  if (!otro) throw new HttpError(400, 'Debe quedar al menos un administrador con acceso');
+}
+const personaVigente = id => {
+  const a = get(`SELECT id, rol FROM personas WHERE id = ? AND eliminado_en IS NULL`, id);
+  if (!a) throw new HttpError(404, 'Persona no encontrada');
+  return a;
+};
+
+ruta('POST', '/api/personas', soloAdmin((q, p, body) => {
+  const d = datosPersona(body);
+  if (!d.nombre) throw new HttpError(400, 'El nombre es obligatorio');
+  return { id: insertar('personas', d) };
+}));
+ruta('PUT', '/api/personas/:id', soloAdmin((q, p, body, usuario) => tx(() => {
+  const id = Number(p.id), actual = personaVigente(id);
+  const d = datosPersona(body, id);
+  if (actual.rol === 'admin' && (d.rol === 'empleado' || d.estado === 'Inactivo')) exigirOtroAdmin(id);
+  actualizar('personas', id, d);
+  // Una contraseña cambiada por un admin o una baja expulsan las sesiones abiertas de esa persona
+  if (d.estado === 'Inactivo' || (d.password_hash && id !== usuario.id)) run(`DELETE FROM sesiones WHERE persona_id = ?`, id);
+  return { ok: true };
+})));
+
+// Quien aparece en el historial no se puede borrar del todo (el historial es inmutable):
+// se retiran sus datos y su acceso, y solo queda su nombre en los registros pasados.
+ruta('DELETE', '/api/personas/:id', soloAdmin((q, p, b, usuario) => tx(() => {
+  const id = Number(p.id), actual = personaVigente(id);
+  if (id === usuario.id) throw new HttpError(400, 'No puedes eliminar tu propio usuario');
+  if (actual.rol === 'admin') exigirOtroAdmin(id);
+  const n = get(`SELECT COUNT(*) AS n FROM herramientas WHERE responsable_actual_id = ? AND estado <> 'Retirada'`, id).n;
+  if (n) throw new HttpError(409, `Tiene ${n} herramienta${n === 1 ? '' : 's'} a su cargo. Reasígnala${n === 1 ? '' : 's'} antes de eliminar el usuario.`);
+  run(`UPDATE herramientas SET responsable_actual_id = NULL WHERE responsable_actual_id = ?`, id);
+  run(`UPDATE ubicaciones SET responsable_id = NULL WHERE responsable_id = ?`, id);
+  run(`DELETE FROM sesiones WHERE persona_id = ?`, id);
+  const conHistorial = get(`SELECT (SELECT COUNT(*) FROM movimientos WHERE realizado_por_id = ? OR receptor_id = ?)
+    + (SELECT COUNT(*) FROM incidencias WHERE comunicada_por_id = ?) AS n`, id, id, id).n > 0;
+  if (conHistorial) {
+    run(`UPDATE personas SET estado = 'Inactivo', rol = 'empleado', email = NULL, telefono = NULL, password_hash = NULL,
+      eliminado_en = datetime('now','localtime') WHERE id = ?`, id);
+  } else run(`DELETE FROM personas WHERE id = ?`, id);
+  return { ok: true, conservadoEnHistorial: conHistorial };
+})));
 
 // Movimientos (solo alta y consulta: el historial es inmutable) ---------------
 ruta('GET', '/api/movimientos', (q) => {
@@ -373,6 +481,8 @@ ruta('GET', '/api/movimientos', (q) => {
 });
 
 ruta('POST', '/api/movimientos', (q, p, body, usuario) => tx(() => {
+  // Un empleado solo registra a su nombre y con la hora real; el admin puede corregir ambos datos
+  if (!esAdmin(usuario)) { body.realizado_por_id = usuario.id; body.fecha_hora = null; }
   if (!val(body.realizado_por_id)) body.realizado_por_id = usuario.id;   // por defecto, quien ha iniciado sesión
   const h = get(`SELECT * FROM herramientas WHERE id = ?`, Number(body.herramienta_id));
   if (!h) throw new HttpError(400, 'Herramienta no válida');
@@ -409,6 +519,7 @@ ruta('GET', '/api/incidencias', (q) => {
 
 ruta('POST', '/api/incidencias', (q, p, body, usuario) => tx(() => {
   const d = pick(body, CAMPOS.incidencias);
+  if (!esAdmin(usuario)) { d.comunicada_por_id = usuario.id; delete d.estado; delete d.fecha_resolucion; }
   if (!d.comunicada_por_id) d.comunicada_por_id = usuario.id;
   if (!d.herramienta_id) throw new HttpError(400, 'Indica la herramienta');
   if (!d.descripcion) throw new HttpError(400, 'Describe la incidencia');
@@ -421,7 +532,7 @@ ruta('POST', '/api/incidencias', (q, p, body, usuario) => tx(() => {
   return parseFotos(get(`${SQL_INC} WHERE i.id = ?`, id));
 }));
 
-ruta('PUT', '/api/incidencias/:id', (q, p, body) => tx(() => {
+ruta('PUT', '/api/incidencias/:id', soloAdmin((q, p, body) => tx(() => {
   const d = pick(body, CAMPOS.incidencias);
   if (d.estado === 'Resuelta' && !d.fecha_resolucion) d.fecha_resolucion = hoy();
   if (d.estado && d.estado !== 'Resuelta' && !('fecha_resolucion' in body)) d.fecha_resolucion = null;
@@ -429,7 +540,7 @@ ruta('PUT', '/api/incidencias/:id', (q, p, body) => tx(() => {
   const i = get(`SELECT herramienta_id FROM incidencias WHERE id = ?`, Number(p.id));
   sincronizarEstadoPorIncidencias(i.herramienta_id);
   return parseFotos(get(`${SQL_INC} WHERE i.id = ?`, Number(p.id)));
-}));
+})));
 
 // Mantenimientos ----------------------------------------------------------------
 ruta('GET', '/api/mantenimientos', (q) => {
@@ -441,18 +552,18 @@ ruta('GET', '/api/mantenimientos', (q) => {
              COALESCE(m.fecha_realizada, m.fecha_prevista) DESC`, ...p);
 });
 
-ruta('POST', '/api/mantenimientos', (q, p, body) => {
+ruta('POST', '/api/mantenimientos', soloAdmin((q, p, body) => {
   const d = pick(body, CAMPOS.mantenimientos);
   if (!d.herramienta_id || !d.fecha_prevista) throw new HttpError(400, 'Herramienta y fecha prevista son obligatorias');
   return { id: insertar('mantenimientos', d) };
-});
+}));
 
-ruta('PUT', '/api/mantenimientos/:id', (q, p, body) => {
+ruta('PUT', '/api/mantenimientos/:id', soloAdmin((q, p, body) => {
   const d = pick(body, CAMPOS.mantenimientos);
   if (d.estado === 'Realizado' && !d.fecha_realizada) d.fecha_realizada = hoy();
   actualizar('mantenimientos', Number(p.id), d);
   return { ok: true };
-});
+}));
 
 // ---------------------------------------------------------------------------
 // Servidor HTTP

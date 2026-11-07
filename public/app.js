@@ -31,6 +31,8 @@ const TITULOS = {
 };
 // Pantallas "de detalle": muestran flecha atrás en lugar del menú
 const DETALLE = new Set(['herramienta', 'herramienta-editar', 'movimiento', 'incidencia']);
+// Pantallas que un empleado no puede abrir (la API también lo impide)
+const SOLO_ADMIN = new Set(['herramienta-editar', 'ubicaciones', 'etiquetas']);
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -53,11 +55,20 @@ const SES = {
       (recordar ? localStorage : sessionStorage).setItem('sesion', JSON.stringify({ token, usuario }));
     } catch { /* solo en memoria */ }
   },
+  actualizar(usuario) {
+    this.usuario = usuario;
+    try {
+      const almacen = localStorage.getItem('sesion') ? localStorage : sessionStorage;
+      almacen.setItem('sesion', JSON.stringify({ token: this.token, usuario }));
+    } catch { /* solo en memoria */ }
+  },
   borrar() {
     this.token = null; this.usuario = null;
     try { localStorage.removeItem('sesion'); sessionStorage.removeItem('sesion'); } catch { /* nada */ }
   },
 };
+
+const esAdmin = () => SES.usuario?.rol === 'admin';
 
 // ---------------------------------------------------------------- utilidades
 function esc(v) {
@@ -344,15 +355,65 @@ function pintarUsuario() {
   const b = $('#btn-user');
   b.textContent = iniciales(u);
   if (u) { let h = 0; for (const ch of persona(u)) h = (h * 31 + ch.charCodeAt(0)) % 360; b.style.setProperty('--h', h); }
-  $('#drawer-user').innerHTML = u ? `${avatar(u, 'lg')}<div><strong>${esc(persona(u))}</strong><div class="small muted">${esc(u.cargo || '')}</div></div>` : '';
+  $('#drawer-user').innerHTML = u ? `${avatar(u, 'lg')}<div><strong>${esc(persona(u))}</strong><div class="small muted">${esc(u.cargo || (esAdmin() ? 'Administrador' : 'Empleado'))}</div></div>` : '';
+  $$('[data-admin]').forEach(el => { el.hidden = !esAdmin(); });
+}
+
+async function cambiarPassword() {
+  cerrarMenu();
+  const d = await dialogo('Cambiar contraseña', [
+    { name: 'actual', label: 'Contraseña actual', type: 'password', required: true },
+    { name: 'nueva', label: 'Nueva contraseña (mínimo 6 caracteres)', type: 'password', required: true },
+    { name: 'repetir', label: 'Repite la nueva contraseña', type: 'password', required: true },
+  ]);
+  if (!d) return;
+  if (d.nueva !== d.repetir) return toast('Las contraseñas nuevas no coinciden', true);
+  try { await api('POST', '/api/yo/password', d); toast('Contraseña cambiada'); }
+  catch (err) { toast(err.message, true); }
 }
 
 // ------------------------------------------------------------------ vistas
 const VISTAS = {};
 
 // LOGIN -------------------------------------------------------------------------
+function vistaPrimerUso() {
+  document.title = 'Configuración inicial · Inventario';
+  app.innerHTML = `
+    <div class="login">
+      <div class="login-top">
+        <div class="login-mark">${I('wrench')}</div>
+        <h1>Te damos la bienvenida</h1>
+        <p>Crea el usuario administrador de tu empresa</p>
+      </div>
+      <form class="login-form" id="f-primer">
+        <label class="field-ic"><span class="sr-only">Nombre</span>${I('user')}<input name="nombre" required autocomplete="given-name" placeholder="Nombre"></label>
+        <label class="field-ic"><span class="sr-only">Apellidos</span>${I('user')}<input name="apellidos" autocomplete="family-name" placeholder="Apellidos"></label>
+        <label class="field-ic"><span class="sr-only">Email</span>${I('user')}<input type="email" name="email" required autocomplete="username" inputmode="email" placeholder="Email (será tu usuario)"></label>
+        <label class="field-ic"><span class="sr-only">Contraseña</span>${I('lock-keyhole')}<input type="password" name="password" required minlength="6" autocomplete="new-password" placeholder="Contraseña (mínimo 6 caracteres)"></label>
+        <div id="login-error"></div>
+        <button class="btn primary block">Empezar</button>
+      </form>
+    </div>`;
+  const f = $('#f-primer');
+  f.addEventListener('submit', async e => {
+    e.preventDefault();
+    const btn = $('button.primary', f); btn.disabled = true;
+    try {
+      const r = await api('POST', '/api/primer-admin', datosForm(f));
+      CONFIG.primerUso = false;
+      SES.guardar(r.token, r.usuario);
+      pintarUsuario();
+      router();
+    } catch (err) {
+      $('#login-error').innerHTML = `<div class="alert">${I('circle-alert')}${esc(err.message)}</div>`;
+      btn.disabled = false;
+    }
+  });
+}
+
 VISTAS.login = async () => {
   document.body.classList.add('sin-sesion');
+  if (CONFIG.primerUso) return vistaPrimerUso();
   document.title = 'Iniciar sesión · Inventario';
   const demo = CONFIG.demo ? await GET('/api/demo-usuarios').catch(() => []) : [];
   app.innerHTML = `
@@ -481,7 +542,7 @@ VISTAS.buscar = async (_, q) => {
       </form>
       <div class="chips-scroll" role="tablist" aria-label="Estado">${chip('', 'Activas')}${ESTADOS_H.map(e => chip(e, e)).join('')}</div>
     </div>
-    <div class="result-bar"><span class="count" id="n-res" role="status" aria-live="polite">Buscando…</span><a href="#/herramienta-editar/nueva" class="btn tonal sm">${I('plus')}Añadir</a></div>
+    <div class="result-bar"><span class="count" id="n-res" role="status" aria-live="polite">Buscando…</span>${esAdmin() ? `<a href="#/herramienta-editar/nueva" class="btn tonal sm">${I('plus')}Añadir</a>` : ''}</div>
     <div class="active-filters" id="activos"></div>
     <div id="resultados">${skeleton(4)}</div>`;
 
@@ -655,7 +716,7 @@ VISTAS.herramienta = async ([ref]) => {
   const url = urlQR(h);
   const t = tono(h.estado);
   const seg = (id, titulo, n) => `<button type="button" class="${id === 'mov' ? 'on' : ''}" data-tab="${id}">${titulo}${n != null ? ` <span class="n">${n}</span>` : ''}</button>`;
-  $('#appbar-extra').innerHTML = `<a class="icon-btn" href="#/herramienta-editar/${h.id}" aria-label="Editar">${I('pencil')}</a>`;
+  if (esAdmin()) $('#appbar-extra').innerHTML = `<a class="icon-btn" href="#/herramienta-editar/${h.id}" aria-label="Editar">${I('pencil')}</a>`;
   app.innerHTML = `
     <section class="hero t-${t}">
       <div class="hero-media">${h.foto ? `<img src="${esc(h.foto)}" alt="Foto de ${esc(h.nombre)}">` : I(ICON_CAT[h.categoria] || 'package')}</div>
@@ -675,8 +736,8 @@ VISTAS.herramienta = async ([ref]) => {
       <div class="quick">
         ${h.estado !== 'Retirada' ? `<a class="primary" href="#/movimiento/${enc(h.codigo)}">${I('user-plus')}Asignar</a>` : `<button type="button" class="primary" disabled>${I('lock')}De baja</button>`}
         <a class="incid" href="#/incidencia/${enc(h.codigo)}">${I('triangle-alert')}Incidencia</a>
-        <button type="button" id="btn-mant">${I('wrench')}Mantenim.</button>
-        <button type="button" class="more" id="btn-mas-ficha" aria-label="Más opciones">${I('ellipsis')}</button>
+        ${esAdmin() ? `<button type="button" id="btn-mant">${I('wrench')}Mantenim.</button>
+        <button type="button" class="more" id="btn-mas-ficha" aria-label="Más opciones">${I('ellipsis')}</button>` : ''}
       </div>
     </section>
 
@@ -705,7 +766,7 @@ VISTAS.herramienta = async ([ref]) => {
         ${svgQR(url)}
         <div class="xs mono muted" style="word-break:break-all;margin-top:.5rem">${esc(url)}</div>
         <div class="btn-row" style="justify-content:center;margin-top:.75rem">
-          <a class="btn sm tonal" href="#/etiquetas?ids=${h.id}">${I('printer')}Etiqueta</a>
+          ${esAdmin() ? `<a class="btn sm tonal" href="#/etiquetas?ids=${h.id}">${I('printer')}Etiqueta</a>` : ''}
           <button type="button" class="btn sm tonal" id="btn-copiar">${I('copy')}Copiar enlace</button>
         </div>
       </div>
@@ -718,8 +779,8 @@ VISTAS.herramienta = async ([ref]) => {
   $('#btn-copiar').addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(url); toast('Enlace copiado'); } catch { prompt('Copia el enlace:', url); }
   });
-  $('#btn-mant').addEventListener('click', () => nuevoMantenimiento(h.id));
-  $('#btn-mas-ficha').addEventListener('click', () => opcionesHerramienta(h));
+  $('#btn-mant')?.addEventListener('click', () => nuevoMantenimiento(h.id));
+  $('#btn-mas-ficha')?.addEventListener('click', () => opcionesHerramienta(h));
   $('#btn-qr-mini').addEventListener('click', () => {
     const tab = $('[data-tab="dat"]'); tab.click(); tab.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
@@ -863,8 +924,8 @@ VISTAS.movimiento = async ([ref], q = {}) => {
       </div>
       <div class="form-sec">
         <div class="sec-title"><span class="step">4</span>Detalles</div>
-        <label>Realiza el movimiento<select name="realizado_por_id">${optPersonas(personas, SES.usuario.id)}</select></label>
-        <label>Fecha y hora<input type="datetime-local" name="fecha_hora" value="${ahoraLocal()}" required></label>
+        ${esAdmin() ? `<label>Realiza el movimiento<select name="realizado_por_id">${optPersonas(personas, SES.usuario.id)}</select></label>
+        <label>Fecha y hora<input type="datetime-local" name="fecha_hora" value="${ahoraLocal()}" required></label>` : ''}
         <label>Observaciones <span class="hint">Opcional</span><textarea name="observaciones" placeholder="Estado en que se entrega, accesorios…"></textarea></label>
       </div>
       <div class="sticky-cta"><button class="btn primary">${I('check')}Registrar movimiento</button></div>
@@ -940,7 +1001,7 @@ VISTAS.incidencia = async ([ref]) => {
         <div class="choice four">
           ${PRIORIDADES.map(p => `<label class="t-${tono(p)}"><input type="radio" name="prioridad" value="${p}" ${p === 'Media' ? 'checked' : ''}>${I(TONO[p][1])}<span>${p}</span></label>`).join('')}
         </div>
-        <label>Comunicada por<select name="comunicada_por_id" required>${optPersonas(personas, SES.usuario.id, 'Selecciona…')}</select></label>
+        ${esAdmin() ? `<label>Comunicada por<select name="comunicada_por_id" required>${optPersonas(personas, SES.usuario.id, 'Selecciona…')}</select></label>` : ''}
         <label class="switch">Marcar la herramienta como averiada<input type="checkbox" name="marcar_averiada" checked></label>
       </div>
       <div class="sticky-cta"><button class="btn alarm">${I('triangle-alert')}Registrar incidencia</button></div>
@@ -975,7 +1036,7 @@ function incidenciaCard(i) {
     </div>
     <p style="margin:.6rem 0 0">${esc(i.descripcion)}</p>
     ${i.fotos.length ? `<div class="photos">${i.fotos.map(f => `<a href="${esc(f)}" target="_blank"><img src="${esc(f)}" alt="Foto de la incidencia"></a>`).join('')}</div>` : ''}
-    <div class="inline-select">${pill(i.estado)}<select data-inc="${i.id}" aria-label="Cambiar estado">${opciones(ESTADOS_I, i.estado)}</select></div>
+    <div class="inline-select">${pill(i.estado)}${esAdmin() ? `<select data-inc="${i.id}" aria-label="Cambiar estado">${opciones(ESTADOS_I, i.estado)}</select>` : ''}</div>
     ${i.fecha_resolucion ? `<div class="xs muted" style="margin-top:.4rem">Resuelta el ${fmtFecha(i.fecha_resolucion)}</div>` : ''}
   </div>`;
 }
@@ -1014,7 +1075,7 @@ function mantItem(m) {
       <div class="sub">${esc(m.tipo)} · ${fmtFecha(m.fecha_prevista)}${m.fecha_realizada ? ' → ' + fmtFecha(m.fecha_realizada) : ''}</div>
       <div class="sub">${esc(m.proveedor || 'Sin proveedor')} · ${euros(m.coste)}</div>
       ${m.observaciones ? `<div class="small" style="margin-top:.2rem">${esc(m.observaciones)}</div>` : ''}
-      ${prog ? `<button type="button" class="btn sm tonal" data-hecho="${m.id}" style="margin-top:.5rem">${I('check')}Marcar realizado</button>` : ''}
+      ${prog && esAdmin() ? `<button type="button" class="btn sm tonal" data-hecho="${m.id}" style="margin-top:.5rem">${I('check')}Marcar realizado</button>` : ''}
     </div>
   </div>`;
 }
@@ -1043,11 +1104,11 @@ VISTAS.mantenimientos = async () => {
     ['calendar-plus', 'Más adelante', prog.filter(m => diasHasta(m.fecha_prevista) > 30)],
     ['history', 'Historial', items.filter(m => m.estado !== 'Programado')],
   ];
-  $('#appbar-extra').innerHTML = `<button class="icon-btn" id="btn-nuevo" aria-label="Programar mantenimiento">${I('plus')}</button>`;
+  if (esAdmin()) $('#appbar-extra').innerHTML = `<button class="icon-btn" id="btn-nuevo" aria-label="Programar mantenimiento">${I('plus')}</button>`;
   app.innerHTML = grupos.map(([ic, t, arr]) => arr.length ? `<h2>${I(ic)} ${t} <span style="margin-left:auto">${arr.length}</span></h2>
       <div class="group">${arr.map(mantItem).join('')}</div>` : '').join('') +
     (!prog.length ? `<div class="card">${vacio('calendar-check', 'Nada programado')}</div>` : '');
-  $('#btn-nuevo').addEventListener('click', () => nuevoMantenimiento());
+  $('#btn-nuevo')?.addEventListener('click', () => nuevoMantenimiento());
   $$('[data-hecho]').forEach(b => b.addEventListener('click', async () => {
     const m = items.find(x => String(x.id) === b.dataset.hecho);
     const d = await dialogo(`Mantenimiento realizado`, [
@@ -1106,34 +1167,51 @@ VISTAS.ubicaciones = async () => {
 // PERSONAS ------------------------------------------------------------------------
 VISTAS.personas = async () => {
   const personas = await GET('/api/personas');
-  $('#appbar-extra').innerHTML = `<button class="icon-btn" data-edit="" aria-label="Nueva persona">${I('plus')}</button>`;
+  const admin = esAdmin();
+  if (admin) $('#appbar-extra').innerHTML = `<button class="icon-btn" data-edit="" aria-label="Nueva persona">${I('plus')}</button>`;
   app.innerHTML = `<div class="group" style="margin-top:.25rem">${personas.map(p => `
     <div class="item">
       ${avatar(p)}
       <div class="body"><div class="title">${esc(persona(p))}</div>
         <div class="sub">${esc(p.cargo || '—')} · <a href="#/herramientas?responsable=${p.id}">${p.num_herramientas} herramienta${p.num_herramientas === 1 ? '' : 's'}</a></div>
-        <div class="xs muted" style="display:flex;gap:.6rem;margin-top:.15rem">${p.tiene_acceso ? `<span>${I('key-round')} Acceso a la app</span>` : `<span>${I('lock')} Sin acceso</span>`}${p.estado === 'Inactivo' ? pill('Inactivo', { icono: false }) : ''}</div></div>
+        <div class="xs muted persona-tags">${p.rol === 'admin' ? `<span>${I('shield-alert')} Administrador</span>` : ''}${admin ? (p.tiene_acceso ? `<span>${I('key-round')} Acceso a la app</span>` : `<span>${I('lock')} Sin acceso</span>`) : ''}${p.estado === 'Inactivo' ? pill('Inactivo', { icono: false }) : ''}</div></div>
       <div class="trail">
         ${p.telefono ? `<a class="icon-btn" href="tel:${esc(p.telefono.replace(/\s/g, ''))}" aria-label="Llamar">${I('phone')}</a>` : ''}
-        <button type="button" class="icon-btn" data-edit="${p.id}" aria-label="Editar">${I('pencil')}</button>
+        ${admin ? `<button type="button" class="icon-btn" data-edit="${p.id}" aria-label="Editar ${esc(persona(p))}">${I('pencil')}</button>` : ''}
+        ${admin && p.id !== SES.usuario.id ? `<button type="button" class="icon-btn" data-borrar="${p.id}" aria-label="Eliminar ${esc(persona(p))}">${I('trash-2')}</button>` : ''}
       </div>
     </div>`).join('')}</div>`;
   $$('[data-edit]').forEach(b => b.addEventListener('click', async () => {
-    const p = personas.find(x => String(x.id) === b.dataset.edit) || { estado: 'Activo' };
+    const p = personas.find(x => String(x.id) === b.dataset.edit) || { estado: 'Activo', rol: 'empleado' };
     const d = await dialogo(p.id ? persona(p) : 'Nueva persona', [
       { name: 'nombre', label: 'Nombre', required: true },
       { name: 'apellidos', label: 'Apellidos' },
       { name: 'telefono', label: 'Teléfono', type: 'tel' },
       { name: 'email', label: 'Email (usuario de acceso)', type: 'email' },
       { name: 'cargo', label: 'Cargo' },
+      { name: 'rol', label: 'Permisos', type: 'select', options: opciones(['empleado', 'admin'], p.rol, { texto: r => r === 'admin' ? 'Administrador: control total' : 'Empleado: movimientos e incidencias' }) },
       { name: 'estado', label: 'Estado', type: 'select', options: opciones(['Activo', 'Inactivo'], p.estado) },
-      { name: 'password', label: p.id ? 'Nueva contraseña (vacío = sin cambios)' : 'Contraseña (opcional)', type: 'password', placeholder: '••••' },
+      { name: 'password', label: p.id ? 'Nueva contraseña (vacío = sin cambios)' : 'Contraseña (sin ella no podrá entrar)', type: 'password', placeholder: 'Mínimo 6 caracteres' },
     ], p);
     if (!d) return;
     try {
       if (p.id) await api('PUT', '/api/personas/' + p.id, d); else await api('POST', '/api/personas', d);
-      toast('Persona guardada'); VISTAS.personas();
+      toast('Persona guardada');
+      if (p.id === SES.usuario.id) { SES.actualizar(await GET('/api/yo')); pintarUsuario(); }
+      router();
     } catch (err) { toast(err.message, true); }
+  }));
+  $$('[data-borrar]').forEach(b => b.addEventListener('click', () => {
+    const p = personas.find(x => String(x.id) === b.dataset.borrar);
+    const dlg = hoja(`<div class="sheet-head"><h3>Eliminar usuario</h3><button type="button" class="icon-btn" data-cerrar aria-label="Cerrar">${I('x')}</button></div>
+      <p>¿Eliminar a <strong>${esc(persona(p))}</strong>? Perderá el acceso y desaparecerá de la lista. Esta acción no se puede deshacer.</p>
+      <p class="note" style="margin:0">${I('info')}<span>Si aparece en movimientos o incidencias, su nombre se conserva solo en esos registros.</span></p>
+      <button type="button" class="btn alarm block" id="ok-borrar" style="margin-top:.75rem">${I('trash-2')}Eliminar</button>`);
+    $('#ok-borrar', dlg).addEventListener('click', async () => {
+      dlg.close();
+      try { await api('DELETE', '/api/personas/' + p.id); toast('Usuario eliminado'); router(); }
+      catch (err) { toast(err.message, true); }
+    });
   }));
 };
 
@@ -1153,7 +1231,7 @@ VISTAS.etiquetas = async (_, q) => {
       <h3>Preparar etiquetas QR</h3>
       <label>Formato de impresión<select id="label-format">${Object.entries(formatos).map(([key, f]) => `<option value="${key}" ${key === 'a4-mediana' ? 'selected' : ''}>${f.nombre}</option>`).join('')}</select></label>
       <label>Al escanear<select id="label-action"><option value="h">Abrir ficha</option><option value="m" ${q.tipo === 'm' ? 'selected' : ''}>Registrar movimiento</option><option value="i">Comunicar incidencia</option></select></label>
-      <label>Contenido<select id="label-content"><option value="completa">QR, código y nombre</option><option value="qr" ${q.contenido === 'qr' ? 'selected' : ''}>Solo QR (ocupa menos)</option></select></label>
+      <label>Contenido<select id="label-content"><option value="completa">Nombre y código junto al QR</option><option value="qr" ${q.contenido === 'qr' ? 'selected' : ''}>QR más grande, nombre debajo</option></select></label>
       <label>Copias por herramienta<input id="label-copies" type="number" min="1" max="50" value="1"></label>
       <details><summary>Seleccionar herramientas (<span id="label-selected"></span>)</summary>
         <div class="label-selection-actions"><button type="button" class="btn sm tonal" id="label-all">Todas</button><button type="button" class="btn sm ghost" id="label-none">Ninguna</button></div>
@@ -1188,17 +1266,16 @@ VISTAS.etiquetas = async (_, q) => {
     const tipo = $('#label-action').value;
     const qrCache = new Map(selected.map(h => [h.id, svgQR(urlQR(h, tipo))]));
     const soloQR = $('#label-content').value === 'qr';
-    const qrMm = soloQR ? Math.min(f.w, f.h) - 2 : Math.min(f.h - 4, f.w * .48);
+    // Siempre se imprime el nombre: un QR sin texto no se distingue a simple vista
+    const qrMm = soloQR ? Math.min(f.w - 2, f.h - 7) : Math.min(f.h - 4, f.w * .48);
     for (let i = 0; i < labels.length; i += perPage) {
       pages.push(`<section class="label-sheet ${f.roll ? 'label-roll' : ''} ${soloQR ? 'label-only-qr' : ''}" style="--label-w:${f.w}mm;--label-h:${f.h}mm;--label-qr:${qrMm}mm;--label-cols:${f.cols}">
-        ${labels.slice(i, i + perPage).map(h => soloQR
-          ? `<div class="label-qr" title="${esc(h.codigo)} · ${esc(h.nombre)}">${qrCache.get(h.id)}</div>`
-          : `<div class="label-qr">${qrCache.get(h.id)}
-          <div class="label-text"><div class="c">${esc(h.codigo)}</div><div class="n">${esc(h.nombre)}</div><div class="n">${esc(h.marca || '')}</div></div>
+        ${labels.slice(i, i + perPage).map(h => `<div class="label-qr">${qrCache.get(h.id)}
+          <div class="label-text"><div class="n">${esc(h.nombre)}</div><div class="c">${esc(h.codigo)}</div>${!soloQR && h.marca && f.h >= 40 ? `<div class="m">${esc(h.marca)}</div>` : ''}</div>
         </div>`).join('')}</section>`);
     }
     $('#label-preview').innerHTML = pages.join('');
-    $('#label-summary').textContent = `${labels.length} etiquetas · ${pages.length} ${f.roll ? 'páginas' : 'hojas A4'} · ${f.w} × ${f.h} mm${soloQR ? ` · solo QR de ${qrMm} mm` : ''}`;
+    $('#label-summary').textContent = `${labels.length} etiquetas · ${pages.length} ${f.roll ? 'páginas' : 'hojas A4'} · ${f.w} × ${f.h} mm${soloQR ? ` · QR de ${qrMm} mm` : ''}`;
   };
   $('.label-settings').addEventListener('change', render);
   $('#label-copies').addEventListener('input', render);
@@ -1224,6 +1301,10 @@ async function router() {
   let nombre = ALIAS[partes[0] || ''] ?? partes[0];
   partes.shift();
   if (!VISTAS[nombre] || nombre === 'login') nombre = 'inicio';
+  if (SOLO_ADMIN.has(nombre) && !esAdmin()) {
+    toast('Esa pantalla es solo para administradores', true);
+    nombre = 'inicio';
+  }
   const q = Object.fromEntries(new URLSearchParams(qs));
 
   // Barra superior: atrás en pantallas de detalle, menú en las principales
@@ -1260,6 +1341,7 @@ $('#btn-scan-tab').addEventListener('click', escanearQR);
 $('#btn-user').addEventListener('click', abrirMenu);
 $('#scrim').addEventListener('click', cerrarMenu);
 document.addEventListener('keydown', e => { if (e.key === 'Escape') cerrarMenu(); });
+$('#btn-password').addEventListener('click', cambiarPassword);
 $('#btn-logout').addEventListener('click', async () => {
   await api('POST', '/api/logout').catch(() => {});
   SES.borrar();
@@ -1275,4 +1357,7 @@ $$('i[data-i]').forEach(el => { el.outerHTML = I(el.dataset.i); });
 SES.cargar();
 pintarUsuario();
 navegaciones = 1;
-GET('/api/config').then(c => (CONFIG = c)).catch(() => {}).finally(router);
+// Los permisos se releen al abrir: pueden haber cambiado, o venir de una sesión anterior a los roles
+GET('/api/config').then(c => (CONFIG = c)).catch(() => {})
+  .then(() => SES.token ? GET('/api/yo').then(u => { SES.actualizar(u); pintarUsuario(); }).catch(() => {}) : null)
+  .finally(router);
